@@ -150,6 +150,17 @@ def init_db():
             changed_at  TEXT DEFAULT (datetime('now')),
             changed_by  TEXT DEFAULT ''
         );
+
+        CREATE TABLE IF NOT EXISTS plan_user_preferences (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id  INTEGER NOT NULL,
+            user_name   TEXT NOT NULL,
+            pref_key    TEXT NOT NULL,
+            pref_value  TEXT NOT NULL,
+            updated_at  TEXT DEFAULT (datetime('now')),
+            UNIQUE(project_id, user_name, pref_key),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
     """)
 
     # Lightweight migration for older DBs created before project_no existed.
@@ -809,6 +820,44 @@ def delete_plan_column(col_id):
             (row["col_key"], row["project_id"]),
         )
         conn.execute("DELETE FROM plan_columns WHERE id=?", (col_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_plan_user_preference(project_id, user_name, pref_key, default=None):
+    conn = get_conn()
+    row = conn.execute(
+        """
+        SELECT pref_value
+        FROM plan_user_preferences
+        WHERE project_id=? AND user_name=? AND pref_key=?
+        """,
+        (project_id, (user_name or "").strip(), pref_key),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return default
+    try:
+        return json.loads(row["pref_value"])
+    except Exception:
+        return default
+
+
+def set_plan_user_preference(project_id, user_name, pref_key, pref_value):
+    user_name = (user_name or "").strip()
+    if not user_name:
+        return
+    payload = json.dumps(pref_value)
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO plan_user_preferences (project_id, user_name, pref_key, pref_value, updated_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(project_id, user_name, pref_key) DO UPDATE
+        SET pref_value=excluded.pref_value, updated_at=excluded.updated_at
+        """,
+        (project_id, user_name, pref_key, payload),
+    )
     conn.commit()
     conn.close()
 
