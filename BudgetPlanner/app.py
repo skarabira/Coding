@@ -35,13 +35,21 @@ page = st.sidebar.radio(
 )
 
 # Helper: project selector shown on most pages
-def select_project(label="Select project"):
+def select_project(label="Select project", state_key="selected_project_name"):
     projects = db.get_projects()
     if not projects:
         st.warning("No projects yet. Go to **📁 Projects** to create one.")
         return None, None
     names = [p["name"] for p in projects]
-    chosen = st.selectbox(label, names)
+
+    # Keep project choice stable when navigating between pages/tabs.
+    if state_key not in st.session_state or st.session_state[state_key] not in names:
+        st.session_state[state_key] = names[0]
+
+    _idx = names.index(st.session_state[state_key])
+    chosen = st.selectbox(label, names, index=_idx, key=f"{state_key}__widget")
+    st.session_state[state_key] = chosen
+
     proj = next(p for p in projects if p["name"] == chosen)
     return proj["id"], proj
 
@@ -199,7 +207,8 @@ def render_table_view(df, key_prefix, filter_columns=None, total_columns=None, s
 # 1. DASHBOARD
 # ════════════════════════════════════════════════════════════════════════════
 if page == "🏠 Dashboard":
-    st.title("🏠 Dashboard")
+    st.title("🏠 1. Dashboard")
+    st.caption("Reference: 1.1 Project Summary | 1.2 Budget vs Actuals vs EAC | 1.3 Monthly Actuals")
     st.markdown("Overview by project and by month, with Labour vs Other split.")
 
     projects = db.get_projects()
@@ -307,7 +316,7 @@ if page == "🏠 Dashboard":
                 monthly_pivot["Other"] = 0.0
             monthly_pivot["Total"] = monthly_pivot["Labour"] + monthly_pivot["Other"]
 
-            st.markdown("**Monthly Actuals Table (€):**")
+            st.markdown("**1.3.1 Monthly Actuals Table (€):**")
             render_table_view(
                 monthly_pivot.rename(columns={"Labour": "Labour (€)", "Other": "Other (€)", "Total": "Total (€)"}),
                 key_prefix="dashboard_monthly",
@@ -320,14 +329,449 @@ if page == "🏠 Dashboard":
         else:
             st.info("No actuals available yet for monthly dashboard view.")
 
+        st.markdown("---")
+        with st.expander("🧮 1.4 Group by Project MCR (pivot-style)", expanded=False):
+            st.caption(
+                "Collapsed: one row per Project MCR with aggregated totals. "
+                "Expanded: shows totals per Task Name under that Project MCR."
+            )
+
+            _pmap = {p["name"]: p for p in projects}
+            _dash_proj_name = st.selectbox(
+                "Project",
+                list(_pmap.keys()),
+                key="dash_mcr_project_sel",
+            )
+            _dash_proj = _pmap[_dash_proj_name]
+
+            _dash_tasks = db.get_plan_tasks(_dash_proj["id"])
+            if not _dash_tasks:
+                st.info("No budget plan tasks found for this project.")
+            else:
+                _dash_vmap = db.get_plan_values_for_project(_dash_proj["id"])
+                _dash_tvmap = db.get_plan_text_values_for_project(_dash_proj["id"])
+                _dash_cols = db.get_plan_columns(_dash_proj["id"])
+
+                def _norm_key(_s):
+                    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(_s or "").strip().lower()).split())
+
+                _dash_col_keys = [c.get("col_key") for c in _dash_cols]
+                _mcr_group_col = "custom_project_mcr"
+                if _mcr_group_col not in _dash_col_keys:
+                    _mcr_group_col = next((k for k in _dash_col_keys if _norm_key(k) == "custom project mcr"), None)
+
+                _rg_type_col = next(
+                    (
+                        k for k in _dash_col_keys
+                        if _norm_key(k) in {"sp rg type", "sp rg type t", "rg type"}
+                        or "sp rg type" in _norm_key(k)
+                    ),
+                    None,
+                )
+
+                if not _mcr_group_col:
+                    st.info("Custom column 'custom_project_mcr' not found for this project.")
+                else:
+                    try:
+                        _ds = datetime.date.fromisoformat(_dash_proj.get("start_date") or "")
+                        _de = datetime.date.fromisoformat(_dash_proj.get("end_date") or "")
+                    except Exception:
+                        _ds = datetime.date.today().replace(day=1)
+                        _de = _ds.replace(year=_ds.year + 1)
+
+                    _months = []
+                    _cur = _ds.replace(day=1)
+                    while _cur <= _de.replace(day=1):
+                        _months.append(_cur.strftime("%Y-%m"))
+                        if _cur.month == 12:
+                            _cur = _cur.replace(year=_cur.year + 1, month=1)
+                        else:
+                            _cur = _cur.replace(month=_cur.month + 1)
+
+                    _rows = []
+                    for _t in _dash_tasks:
+                        _tid = int(_t["id"])
+                        _mcr_val = str(_dash_tvmap.get((_tid, _mcr_group_col), "") or "").strip()
+                        if not _mcr_val:
+                            _mcr_val = str(_dash_vmap.get((_tid, _mcr_group_col), "") or "").strip()
+                        if not _mcr_val:
+                            _mcr_val = "(blank)"
+
+                        _rg_type_val = ""
+                        if _rg_type_col:
+                            _rg_type_val = str(_dash_tvmap.get((_tid, _rg_type_col), "") or "").strip()
+                            if not _rg_type_val:
+                                _rg_type_val = str(_dash_vmap.get((_tid, _rg_type_col), "") or "").strip()
+
+                        _monthly_sum = sum(float(_dash_vmap.get((_tid, _m), 0.0) or 0.0) for _m in _months)
+                        _rows.append(
+                            {
+                                "Project MCR #": _mcr_val,
+                                "Task Name": str(_t.get("task_name") or ""),
+                                "RG type": _rg_type_val,
+                                "Resource group": str(_t.get("resource_group") or ""),
+                                "Total (€)": _monthly_sum,
+                            }
+                        )
+
+                    _src_df = pd.DataFrame(_rows)
+                    _mcr_values = sorted(_src_df["Project MCR #"].astype(str).unique().tolist())
+                    _mcr_expanded_key = f"dash_mcr_group_expanded__{_dash_proj['id']}"
+                    if _mcr_expanded_key not in st.session_state:
+                        st.session_state[_mcr_expanded_key] = {}
+
+                    _g1, _g2, _g3, _g4 = st.columns([3, 1, 1, 3])
+                    _sel_mcr = _g1.selectbox("Project MCR #", _mcr_values, key=f"{_mcr_expanded_key}__pick")
+                    if _g2.button("Toggle", key=f"{_mcr_expanded_key}__toggle"):
+                        _emap = st.session_state[_mcr_expanded_key]
+                        _emap[_sel_mcr] = not bool(_emap.get(_sel_mcr, False))
+                        st.session_state[_mcr_expanded_key] = _emap
+                        st.rerun()
+                    if _g3.button("Expand All", key=f"{_mcr_expanded_key}__expand_all"):
+                        st.session_state[_mcr_expanded_key] = {k: True for k in _mcr_values}
+                        st.rerun()
+                    if _g4.button("Collapse All", key=f"{_mcr_expanded_key}__collapse_all"):
+                        st.session_state[_mcr_expanded_key] = {}
+                        st.rerun()
+
+                    _out_rows = []
+                    for _mcr in _mcr_values:
+                        _mdf = _src_df[_src_df["Project MCR #"] == _mcr].copy()
+                        _out_rows.append(
+                            {
+                                "Project MCR #": _mcr,
+                                "Task Name": "",
+                                "RG type": "",
+                                "Resource group": "",
+                                "Total (€)": float(pd.to_numeric(_mdf["Total (€)"], errors="coerce").fillna(0.0).sum()),
+                            }
+                        )
+                        if bool(st.session_state[_mcr_expanded_key].get(_mcr, False)):
+                            _task_agg = _mdf.groupby("Task Name", dropna=False, as_index=False).agg({
+                                "Total (€)": "sum",
+                                "RG type": lambda s: ", ".join(sorted({str(v).strip() for v in s if str(v).strip()})),
+                                "Resource group": lambda s: ", ".join(sorted({str(v).strip() for v in s if str(v).strip()})),
+                            }).sort_values("Task Name")
+                            for _, _tr in _task_agg.iterrows():
+                                _out_rows.append(
+                                    {
+                                        "Project MCR #": "",
+                                        "Task Name": f"↳ {_tr.get('Task Name', '')}",
+                                        "RG type": str(_tr.get("RG type") or ""),
+                                        "Resource group": str(_tr.get("Resource group") or ""),
+                                        "Total (€)": float(_tr.get("Total (€)") or 0.0),
+                                    }
+                                )
+
+                    _out_df = pd.DataFrame(_out_rows)[["Project MCR #", "Task Name", "RG type", "Resource group", "Total (€)"]]
+                    st.dataframe(
+                        _out_df,
+                        hide_index=True,
+                        use_container_width=True,
+                        column_config={
+                            "Project MCR #": st.column_config.TextColumn("Project MCR #"),
+                            "Task Name": st.column_config.TextColumn("Task Name"),
+                            "RG type": st.column_config.TextColumn("RG type"),
+                            "Resource group": st.column_config.TextColumn("Resource group"),
+                            "Total (€)": st.column_config.NumberColumn("Total (€)", format="€ %,.2f"),
+                        },
+                    )
+
+        with st.expander("📈 1.5 Plan vs Actual by Project No. (monthly)", expanded=False):
+            st.caption(
+                "Shows monthly actuals stacked by Project No. and compares them against total monthly plan on the same axis. "
+                "Project No. corresponds to the MCR identifier (for example BM-00110021_002)."
+            )
+
+            _cmp_pmap = {p["name"]: p for p in projects}
+            _cmp_proj_name = st.selectbox(
+                "Project",
+                list(_cmp_pmap.keys()),
+                key="dash_plan_actual_project_sel",
+            )
+            _cmp_proj = _cmp_pmap[_cmp_proj_name]
+
+            _cmp_tasks = db.get_plan_tasks(_cmp_proj["id"])
+            _cmp_actuals = db.get_actuals(_cmp_proj["id"])
+            if not _cmp_tasks and not _cmp_actuals:
+                st.info("No plan or actual data found for this project.")
+            else:
+                _cmp_vmap = db.get_plan_values_for_project(_cmp_proj["id"])
+                _cmp_tvmap = db.get_plan_text_values_for_project(_cmp_proj["id"])
+                _cmp_cols = db.get_plan_columns(_cmp_proj["id"])
+
+                def _cmp_norm_key(_s):
+                    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(_s or "").strip().lower()).split())
+
+                def _cmp_canonical_project_no(_raw):
+                    _txt = str(_raw or "").strip()
+                    if not _txt:
+                        return "Unmapped Project No."
+                    # Normalize values like "BM-00110021_005 - C-Hub ..." to "BM-00110021_005".
+                    _m = re.search(r"([A-Za-z]{2,}-\d+_\d+)", _txt)
+                    return _m.group(1) if _m else _txt
+
+                def _cmp_is_project_no_col(_col_meta):
+                    _norm_key = _cmp_norm_key(_col_meta.get("col_key"))
+                    _norm_label = _cmp_norm_key(_col_meta.get("col_label"))
+                    _preferred = {
+                        "custom project mcr",
+                        "project mcr",
+                        "project no",
+                        "project number",
+                        "prj mcr number",
+                        "mcr number",
+                    }
+                    if _norm_key in _preferred or _norm_label in _preferred:
+                        return True
+                    return (
+                        ("mcr" in _norm_key and "number" in _norm_key)
+                        or ("mcr" in _norm_label and "number" in _norm_label)
+                        or ("project" in _norm_key and "number" in _norm_key)
+                        or ("project" in _norm_label and "number" in _norm_label)
+                        or _norm_key.endswith("project no")
+                        or _norm_label.endswith("project no")
+                    )
+
+                _cmp_mcr_col = next(
+                    (c.get("col_key") for c in _cmp_cols if _cmp_is_project_no_col(c)),
+                    None,
+                )
+
+                try:
+                    _cs = datetime.date.fromisoformat(_cmp_proj.get("start_date") or "")
+                    _ce = datetime.date.fromisoformat(_cmp_proj.get("end_date") or "")
+                except Exception:
+                    _cs = datetime.date.today().replace(day=1)
+                    _ce = _cs.replace(year=_cs.year + 1)
+
+                _cmp_months = []
+                _cur = _cs.replace(day=1)
+                while _cur <= _ce.replace(day=1):
+                    _cmp_months.append(_cur.strftime("%Y-%m"))
+                    if _cur.month == 12:
+                        _cur = _cur.replace(year=_cur.year + 1, month=1)
+                    else:
+                        _cur = _cur.replace(month=_cur.month + 1)
+
+                _plan_rows = []
+                for _t in _cmp_tasks:
+                    _tid = int(_t["id"])
+                    _pno = ""
+                    if _cmp_mcr_col:
+                        _pno = str(_cmp_tvmap.get((_tid, _cmp_mcr_col), "") or "").strip()
+                        if not _pno:
+                            _pno = str(_cmp_vmap.get((_tid, _cmp_mcr_col), "") or "").strip()
+                    _pno = _cmp_canonical_project_no(_pno)
+                    for _m in _cmp_months:
+                        _plan_rows.append(
+                            {
+                                "Project No.": _pno,
+                                "Month": _m,
+                                "Plan (€)": float(_cmp_vmap.get((_tid, _m), 0.0) or 0.0),
+                            }
+                        )
+
+                _act_rows = []
+                for _a in _cmp_actuals:
+                    _dt = pd.to_datetime(_a.get("date"), errors="coerce")
+                    if pd.isna(_dt):
+                        continue
+                    _m = _dt.strftime("%Y-%m")
+                    if _m not in _cmp_months:
+                        continue
+                    _pno = _cmp_canonical_project_no(_a.get("project_no"))
+                    _act_rows.append(
+                        {
+                            "Project No.": _pno,
+                            "Month": _m,
+                            "Actual (€)": float(_a.get("amount", 0.0) or 0.0),
+                        }
+                    )
+
+                _plan_df = pd.DataFrame(_plan_rows)
+                if _plan_df.empty:
+                    _plan_agg = pd.DataFrame(columns=["Project No.", "Month", "Plan (€)"])
+                else:
+                    _plan_agg = _plan_df.groupby(["Project No.", "Month"], as_index=False)["Plan (€)"].sum()
+
+                _act_df = pd.DataFrame(_act_rows)
+                if _act_df.empty:
+                    _act_agg = pd.DataFrame(columns=["Project No.", "Month", "Actual (€)"])
+                else:
+                    _act_agg = _act_df.groupby(["Project No.", "Month"], as_index=False)["Actual (€)"].sum()
+
+                _cmp_df = _plan_agg.merge(_act_agg, on=["Project No.", "Month"], how="outer").fillna(0.0)
+                if _cmp_df.empty:
+                    st.info("No comparable monthly plan/actual data found.")
+                else:
+                    _cmp_df["Variance (€)"] = _cmp_df["Plan (€)"] - _cmp_df["Actual (€)"]
+                    _cmp_df = _cmp_df.sort_values(["Project No.", "Month"]).reset_index(drop=True)
+
+                    _all_pnos = sorted(_cmp_df["Project No."].astype(str).unique().tolist())
+                    _sel_pnos = st.multiselect(
+                        "Filter Project No.",
+                        _all_pnos,
+                        default=_all_pnos,
+                        key="dash_plan_actual_project_no_filter",
+                    )
+                    _view_df = _cmp_df[_cmp_df["Project No."].isin(_sel_pnos)].copy() if _sel_pnos else _cmp_df.iloc[0:0].copy()
+
+                    if _view_df.empty:
+                        st.info("No rows for selected Project No. filter.")
+                    else:
+                        _month_order = _cmp_months  # always show all project months on x-axis
+                        _actual_stacked = (
+                            _view_df.groupby(["Month", "Project No."], as_index=False)["Actual (€)"]
+                            .sum()
+                            .rename(columns={"Actual (€)": "Amount"})
+                        )
+                        _actual_visible_pnos = set(
+                            _actual_stacked.loc[_actual_stacked["Amount"] > 0, "Project No."].astype(str).tolist()
+                        )
+                        _actual_stacked = _actual_stacked[
+                            _actual_stacked["Project No."].astype(str).isin(_actual_visible_pnos)
+                        ].copy()
+                        _actual_stacked["Series"] = "Actual – " + _actual_stacked["Project No."].astype(str)
+
+                        _plan_total = (
+                            _view_df.groupby("Month", as_index=False)["Plan (€)"]
+                            .sum()
+                            .rename(columns={"Plan (€)": "Amount"})
+                        )
+                        _plan_total["Project No."] = "(total plan)"
+                        _plan_total["Series"] = "Total Plan"
+
+                        _actual_total = (
+                            _actual_stacked.groupby("Month", as_index=False)["Amount"]
+                            .sum()
+                            .rename(columns={"Amount": "Actual Total (€)"})
+                        )
+
+                        _cum_df = (
+                            _plan_total[["Month", "Amount"]]
+                            .rename(columns={"Amount": "Plan Total (€)"})
+                            .merge(_actual_total, on="Month", how="outer")
+                            .fillna(0.0)
+                        )
+                        _cum_df["Month"] = pd.Categorical(_cum_df["Month"], categories=_month_order, ordered=True)
+                        _cum_df = _cum_df.sort_values("Month").reset_index(drop=True)
+                        _cum_df["Plan Cum (€)"] = _cum_df["Plan Total (€)"].cumsum()
+                        _cum_df["Actual Cum (€)"] = _cum_df["Actual Total (€)"].cumsum()
+
+                        # ── Estimated Actuals projection ──────────────────────────────────
+                        # Exclude the current month (likely incomplete) from the average.
+                        # Only months before the current calendar month are treated as complete.
+                        _current_ym = datetime.date.today().strftime("%Y-%m")
+                        _months_with_actuals = _cum_df.loc[
+                            (_cum_df["Actual Total (€)"] > 0) & (_cum_df["Month"].astype(str) < _current_ym),
+                            "Month",
+                        ].astype(str).tolist()
+                        _proj_x = []
+                        _proj_y = []
+                        if _months_with_actuals:
+                            _last_actual_month = _months_with_actuals[-1]
+                            _last_actual_idx = _cum_df[_cum_df["Month"].astype(str) == _last_actual_month].index[-1]
+                            _months_with_data_count = len(_months_with_actuals)
+                            _cum_at_last = float(_cum_df.at[_last_actual_idx, "Actual Cum (€)"])
+                            _avg_monthly = _cum_at_last / _months_with_data_count if _months_with_data_count > 0 else 0.0
+                            # Projection starts at the anchor point so the line connects visually.
+                            _proj_x = [_last_actual_month]
+                            _proj_y = [_cum_at_last]
+                            _running = _cum_at_last
+                            for _fm in _month_order[_last_actual_idx + 1:]:
+                                _running += _avg_monthly
+                                _proj_x.append(str(_fm))
+                                _proj_y.append(_running)
+
+                        _chart_df = pd.concat([_actual_stacked, _plan_total], ignore_index=True)
+                        _chart = px.bar(
+                            _chart_df,
+                            x="Month",
+                            y="Amount",
+                            color="Series",
+                            barmode="stack",
+                            category_orders={"Month": _month_order},
+                            height=460,
+                            title="Monthly Actuals by Project No. (stacked bars) vs Total Monthly Plan",
+                        )
+                        for _tr in _chart.data:
+                            _tr.marker.line.width = 0
+                            if _tr.name == "Total Plan":
+                                _tr.offsetgroup = "plan"
+                                _tr.marker.pattern.shape = "/"
+                                _tr.opacity = 0.9
+                            else:
+                                _tr.offsetgroup = "actual"
+                        _chart.add_trace(
+                            go.Scatter(
+                                x=_cum_df["Month"].astype(str),
+                                y=_cum_df["Plan Cum (€)"],
+                                mode="lines+markers",
+                                name="Cumulative Plan",
+                                line={"dash": "dash", "width": 2},
+                                marker={"size": 6},
+                            )
+                        )
+                        _cum_actual_df = _cum_df[_cum_df["Month"].astype(str) < _current_ym]
+                        _chart.add_trace(
+                            go.Scatter(
+                                x=_cum_actual_df["Month"].astype(str),
+                                y=_cum_actual_df["Actual Cum (€)"],
+                                mode="lines+markers",
+                                name="Cumulative Actual",
+                                line={"dash": "dash", "width": 2},
+                                marker={"size": 6},
+                            )
+                        )
+                        if len(_proj_x) > 1:
+                            _chart.add_trace(
+                                go.Scatter(
+                                    x=_proj_x,
+                                    y=_proj_y,
+                                    mode="lines+markers",
+                                    name="Estimated Actuals (projection)",
+                                    line={"dash": "dot", "width": 2},
+                                    marker={"size": 5, "symbol": "circle-open"},
+                                )
+                            )
+                        _chart.update_layout(
+                            legend_title_text="Series",
+                            xaxis_title="Month",
+                            yaxis_title="Amount (€)",
+                            bargap=0.2,
+                            bargroupgap=0.08,
+                            xaxis={
+                                "tickmode": "array",
+                                "tickvals": _month_order,
+                                "ticktext": _month_order,
+                                "tickangle": -45,
+                            },
+                        )
+                        st.plotly_chart(_chart, use_container_width=True)
+
+                        st.dataframe(
+                            _view_df,
+                            hide_index=True,
+                            use_container_width=True,
+                            column_config={
+                                "Project No.": st.column_config.TextColumn("Project No."),
+                                "Month": st.column_config.TextColumn("Month"),
+                                "Plan (€)": st.column_config.NumberColumn("Plan (€)", format="€ %,.2f"),
+                                "Actual (€)": st.column_config.NumberColumn("Actual (€)", format="€ %,.2f"),
+                                "Variance (€)": st.column_config.NumberColumn("Variance (€)", format="€ %,.2f"),
+                            },
+                        )
+
 # ════════════════════════════════════════════════════════════════════════════
 # 2. PROJECTS
 # ════════════════════════════════════════════════════════════════════════════
 elif page == "📁 Projects":
-    st.title("📁 Projects")
+    st.title("📁 2. Projects")
+    st.caption("Reference: 2.1 Add New Project | 2.2 Edit Existing Projects")
 
     # ── Add new project ──
-    with st.expander("➕ Add New Project", expanded=False):
+    with st.expander("➕ 2.1 Add New Project", expanded=False):
         with st.form("add_project_form"):
             c1, c2 = st.columns(2)
             name = c1.text_input("Project Name *")
@@ -354,7 +798,7 @@ elif page == "📁 Projects":
         st.info("No projects yet.")
     else:
         for p in projects:
-            with st.expander(f"{p['name']}  |  {p['status']}  |  {p['start_date']} → {p['end_date']}"):
+            with st.expander(f"2.2 {p['name']}  |  {p['status']}  |  {p['start_date']} → {p['end_date']}"):
                 with st.form(f"edit_proj_{p['id']}"):
                     c1, c2 = st.columns(2)
                     new_name = c1.text_input("Name", value=p["name"])
@@ -383,7 +827,8 @@ elif page == "📁 Projects":
 # 3. BUDGET PLANNING
 # ════════════════════════════════════════════════════════════════════════════
 elif page == "📋 Budget Planning":
-    st.title("📋 Budget Planning")
+    st.title("📋 3. Budget Planning")
+    st.caption("Reference: 3.1 Plan | 3.2 Import from Excel | 3.3 Baselines | 3.4 Columns | 3.5 Audit Log")
     project_id, project = select_project()
     if not project_id:
         st.stop()
@@ -416,8 +861,15 @@ elif page == "📋 Budget Planning":
     all_months = _bp_project_months(p_start, p_end)
 
     # ── User identification (for audit trail) ────────────────────────────────
+    _plan_last_user_pref_key = "plan_last_user"
     if "plan_user" not in st.session_state:
-        st.session_state["plan_user"] = ""
+        _saved_plan_user = db.get_plan_user_preference(
+            project_id,
+            "__default__",
+            _plan_last_user_pref_key,
+            default="",
+        )
+        st.session_state["plan_user"] = str(_saved_plan_user or "").strip()
     _pu_col, _ = st.columns([2, 5])
     _plan_user_input = _pu_col.text_input(
         "👤 Your name (for audit trail)",
@@ -427,7 +879,14 @@ elif page == "📋 Budget Planning":
     )
     if _plan_user_input.strip() != st.session_state["plan_user"]:
         st.session_state["plan_user"] = _plan_user_input.strip()
+        db.set_plan_user_preference(
+            project_id,
+            "__default__",
+            _plan_last_user_pref_key,
+            st.session_state["plan_user"],
+        )
     current_user = st.session_state["plan_user"]
+    _view_pref_user = "__default__"
     if not current_user:
         st.warning("⚠️ Enter your name above — required for save and audit trail.")
 
@@ -435,6 +894,9 @@ elif page == "📋 Budget Planning":
     _custom_cols_meta = db.get_plan_columns(project_id)
     _custom_col_keys  = [c["col_key"] for c in _custom_cols_meta]
     _custom_col_labels = {c["col_key"]: c["col_label"] for c in _custom_cols_meta}
+    _custom_col_data_types = {c["col_key"]: (c.get("data_type") or "decimal") for c in _custom_cols_meta}
+    _text_custom_col_keys = [k for k in _custom_col_keys if (_custom_col_data_types.get(k) or "").lower() == "text"]
+    _text_custom_col_keys_set = set(_text_custom_col_keys)
 
     def _norm_label(text):
         s = str(text or "").strip().lower()
@@ -464,21 +926,21 @@ elif page == "📋 Budget Planning":
         "total", "total annual", "annual total", "total annual cost", "annual cost"
     ])
     _auto_rate_hours_total = bool(_rate_col_key and _hours_col_key)
+    _calc_mode_store_key = "__calc_mode_labor"
     _all_value_keys = all_months + _custom_col_keys
 
     # ── Helper: load plan DataFrame from DB ──────────────────────────────────
     def _load_plan_df():
         tasks = db.get_plan_tasks(project_id)
         vmap  = db.get_plan_values_for_project(project_id)
+        tvmap = db.get_plan_text_values_for_project(project_id)
         base_cols = ["_task_id", "Task Name", "Cost Type", "_calc_mode", "Resource Group", "Employees"]
         if not tasks:
             return pd.DataFrame(columns=base_cols + _all_value_keys + ["Total (€)"])
         records = []
         for t in tasks:
-            _is_labor = (t["cost_type"] or "").strip().lower() == "labor cost"
-            _rate_val = float(vmap.get((t["id"], _rate_col_key), 0.0) or 0.0) if _rate_col_key else 0.0
-            _hours_val = float(vmap.get((t["id"], _hours_col_key), 0.0) or 0.0) if _hours_col_key else 0.0
-            _default_mode = "Calculate" if (_is_labor and _rate_val > 0 and _hours_val > 0) else "Direct"
+            _stored_mode = vmap.get((t["id"], _calc_mode_store_key), None)
+            _default_mode = "Calculated" if (_stored_mode is not None and float(_stored_mode or 0) > 0.5) else "Direct"
             row = {
                 "_task_id": int(t["id"]),
                 "Task Name": t["task_name"] or "",
@@ -488,24 +950,37 @@ elif page == "📋 Budget Planning":
                 "Employees": t["employees"] or "",
             }
             for ck in _all_value_keys:
-                _val = vmap.get((t["id"], ck), 0.0)
-                row[ck] = float(_val if _val is not None else 0.0)
+                if ck in _text_custom_col_keys:
+                    row[ck] = str(tvmap.get((t["id"], ck), "") or "")
+                else:
+                    _val = vmap.get((t["id"], ck), 0.0)
+                    row[ck] = float(_val if _val is not None else 0.0)
             # Total (€) reflects annual budget as the sum of monthly allocations only.
             row["Total (€)"] = sum(row[ck] for ck in all_months)
             records.append(row)
         return pd.DataFrame(records)
 
     plan_df = _load_plan_df()
+    _persisted_by_tid = {}
+    if not plan_df.empty and "_task_id" in plan_df.columns:
+        for _, _pr in plan_df.iterrows():
+            try:
+                _pid = int(float(_pr.get("_task_id") or 0))
+            except Exception:
+                _pid = 0
+            if _pid > 0:
+                _persisted_by_tid[_pid] = _pr
 
     # ── Tabs ─────────────────────────────────────────────────────────────────
     tab_plan, tab_import, tab_baselines, tab_columns, tab_audit = st.tabs([
-        "📋 Plan", "📥 Import from Excel", "🧊 Baselines", "⚙️ Columns", "📜 Audit Log"
+        "📋 3.1 Plan", "📥 3.2 Import from Excel", "🧊 3.3 Baselines", "⚙️ 3.4 Columns", "📜 3.5 Audit Log"
     ])
 
     # ════════════════════════════════════════════════════════════════════════
     # TAB: Budget Plan
     # ════════════════════════════════════════════════════════════════════════
     with tab_plan:
+        _plan_table_slot = st.container()
         # Summary + export
         if not plan_df.empty:
             _total_plan = plan_df["Total (€)"].sum()
@@ -525,6 +1000,8 @@ elif page == "📋 Budget Planning":
                 key="dl_plan_excel",
             )
 
+            # Keep the main planning table directly below the Total Plan summary.
+
         # Column config
         _col_conf = {
             "_task_id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
@@ -536,7 +1013,7 @@ elif page == "📋 Budget Planning":
             "Employees": st.column_config.TextColumn(
                 "Employees", width="large", help="Comma-separated employee names for Labor cost tasks"
             ),
-            "Total (€)": st.column_config.NumberColumn("Total (€)", format="€ %,.2f", disabled=True, width="medium"),
+            "Total (€)": st.column_config.NumberColumn("Total (€)", format="€ %,.2f", min_value=0.0, step=100.0, width="medium"),
         }
         for _ck in all_months:
             _col_conf[_ck] = st.column_config.NumberColumn(
@@ -553,16 +1030,28 @@ elif page == "📋 Budget Planning":
                     _label, format="%.2f", min_value=0.0, step=1.0
                 )
             else:
-                _col_conf[_ck] = st.column_config.NumberColumn(
-                    _label, format="€ %,.2f", min_value=0.0, step=100.0
-                )
+                _dt = (_custom_col_data_types.get(_ck) or "decimal").lower()
+                if _dt == "text":
+                    _col_conf[_ck] = st.column_config.TextColumn(_label)
+                elif _dt == "integer":
+                    _col_conf[_ck] = st.column_config.NumberColumn(
+                        _label, format="%.0f", min_value=0.0, step=1.0
+                    )
+                elif _dt == "currency_eur":
+                    _col_conf[_ck] = st.column_config.NumberColumn(
+                        _label, format="€ %,.2f", min_value=0.0, step=100.0
+                    )
+                else:
+                    _col_conf[_ck] = st.column_config.NumberColumn(
+                        _label, format="%.2f", min_value=0.0, step=1.0
+                    )
         
         if _rate_col_key and _hours_col_key:
             _col_conf["_calc_mode"] = st.column_config.SelectboxColumn(
                 "Auto-Calc Mode (Labor)",
-                options=["Calculate", "Direct"],
+                options=["Direct", "Calculated"],
                 width="medium",
-                help="Calculate: Rate×Hours→Total. Direct: enter Total via months or direct edit."
+                help="Direct (default): keep month-driven values. Calculated: apply Rate×Hours and distribute across months."
             )
 
         _rate_candidates_set  = {"rate / hour", "rate per hour", "hourly rate", "rate hour", "rate"}
@@ -579,6 +1068,8 @@ elif page == "📋 Budget Planning":
             and k != _total_col_key
             and not _is_rate_or_hours_col(k)
         ]
+        if "custom_project_mcr" in _other_custom_cols and "prj_mcr_number" in _other_custom_cols:
+            _other_custom_cols = [k for k in _other_custom_cols if k != "prj_mcr_number"]
         _editor_col_order = [
             "_task_id",
             "Task Name",
@@ -591,6 +1082,15 @@ elif page == "📋 Budget Planning":
             *_other_custom_cols,
             "Total (€)",
         ]
+
+        _show_months_key = f"plan_show_month_cols__{project_id}"
+        _plan_show_months_pref_key = "plan_editor_show_month_columns"
+        _plan_visible_cols_pref_key = "plan_editor_visible_columns"
+        if _show_months_key not in st.session_state:
+            _saved_show_months = (
+                db.get_plan_user_preference(project_id, _view_pref_user, _plan_show_months_pref_key, default=False)
+            )
+            st.session_state[_show_months_key] = bool(_saved_show_months)
 
         _plan_col_pref_key = "plan_editor_column_order"
 
@@ -609,10 +1109,9 @@ elif page == "📋 Budget Planning":
             return _normalized
 
         _saved_editor_col_order = (
-            db.get_plan_user_preference(project_id, current_user, _plan_col_pref_key, default=[])
-            if current_user else []
+            db.get_plan_user_preference(project_id, _view_pref_user, _plan_col_pref_key, default=[])
         )
-        _col_order_state_key = f"plan_editor_col_order__{project_id}__{current_user or 'anon'}"
+        _col_order_state_key = f"plan_editor_col_order__{project_id}"
         if _col_order_state_key not in st.session_state:
             st.session_state[_col_order_state_key] = _normalize_editor_col_order(_saved_editor_col_order)
         else:
@@ -620,22 +1119,87 @@ elif page == "📋 Budget Planning":
                 st.session_state[_col_order_state_key]
             )
 
-        _editor_state = st.session_state.get("plan_data_editor", {})
-        if isinstance(_editor_state, dict):
-            _state_col_order = _editor_state.get("column_order")
-            if isinstance(_state_col_order, list) and _state_col_order:
-                st.session_state[_col_order_state_key] = _normalize_editor_col_order(_state_col_order)
-
         _active_editor_col_order = st.session_state[_col_order_state_key]
+        _visible_cols_state_key = f"plan_editor_visible_cols__{project_id}"
+        if _visible_cols_state_key not in st.session_state:
+            _saved_visible_cols = db.get_plan_user_preference(
+                project_id,
+                _view_pref_user,
+                _plan_visible_cols_pref_key,
+                default=[],
+            )
+            if isinstance(_saved_visible_cols, list) and _saved_visible_cols:
+                _saved_set = set(_saved_visible_cols)
+                st.session_state[_visible_cols_state_key] = [
+                    _c for _c in _active_editor_col_order if _c in _saved_set
+                ]
+            else:
+                st.session_state[_visible_cols_state_key] = list(_active_editor_col_order)
 
-        st.caption(
-            "✏️ Edit task metadata and monthly values directly in the table. "
-            "Add rows at the bottom (**+**). Delete rows with the row-delete icon (✕ on hover). "
-            "Click **💾 Save Changes** to persist."
-        )
+        # Keep visible-columns state aligned with any new/removed columns.
+        _visible_set = set(st.session_state.get(_visible_cols_state_key, []))
+        st.session_state[_visible_cols_state_key] = [
+            _c for _c in _active_editor_col_order if _c in _visible_set
+        ]
 
-        with st.expander("🧭 Column Order", expanded=False):
-            st.caption("Reorder columns left/right and save this order for your user in this project.")
+        def _persist_view_state(_order_vals=None):
+            _order_payload = _normalize_editor_col_order(_order_vals or st.session_state.get(_col_order_state_key, _active_editor_col_order))
+            db.set_plan_user_preference(
+                project_id,
+                _view_pref_user,
+                _plan_col_pref_key,
+                _order_payload,
+            )
+            db.set_plan_user_preference(
+                project_id,
+                _view_pref_user,
+                _plan_show_months_pref_key,
+                bool(st.session_state.get(_show_months_key, False)),
+            )
+            db.set_plan_user_preference(
+                project_id,
+                _view_pref_user,
+                _plan_visible_cols_pref_key,
+                st.session_state.get(_visible_cols_state_key, _order_payload),
+            )
+
+        with st.expander("🧭 3.1.1 Table Layout", expanded=False):
+            st.caption("Use this as the canonical place to configure table layout (visibility, month columns, and order).")
+            _v1, _v2 = st.columns([2, 6])
+            _v1.toggle("Show month columns", key=_show_months_key)
+            _v2.caption("Turn off for compact view; turn on to edit monthly allocations.")
+
+            def _visible_col_label(_col_key):
+                if _col_key == "_task_id":
+                    return "ID"
+                if _col_key == "Total (€)":
+                    return "Total"
+                return _col_key
+
+            _visible_label_to_key = {
+                _visible_col_label(_c): _c for _c in _active_editor_col_order
+            }
+            _visible_options = list(_visible_label_to_key.keys())
+            _visible_default = [
+                _visible_col_label(_c)
+                for _c in st.session_state.get(_visible_cols_state_key, _active_editor_col_order)
+                if _c in _active_editor_col_order
+            ]
+            _vc_sel = st.multiselect(
+                "Visible columns",
+                options=_visible_options,
+                default=_visible_default,
+                key=f"{_visible_cols_state_key}__widget",
+                help="Persisted layout control. Use this for stable show/hide behavior across section switches.",
+            )
+            _selected_key_set = {_visible_label_to_key[_lbl] for _lbl in _vc_sel if _lbl in _visible_label_to_key}
+            _vc_ordered = [
+                _c for _c in _active_editor_col_order
+                if _c in _selected_key_set
+            ]
+            st.session_state[_visible_cols_state_key] = _vc_ordered
+
+            st.markdown("**Column order**")
             _picked_col = st.selectbox(
                 "Column to move",
                 _active_editor_col_order,
@@ -650,6 +1214,7 @@ elif page == "📋 Budget Planning":
                         _active_editor_col_order[_idx - 1],
                     )
                     st.session_state[_col_order_state_key] = _active_editor_col_order
+                    _persist_view_state(_active_editor_col_order)
                     st.session_state.pop("plan_data_editor", None)
                     st.rerun()
             if _co2.button("➡️ Move Right", key=f"{_col_order_state_key}__right"):
@@ -660,55 +1225,212 @@ elif page == "📋 Budget Planning":
                         _active_editor_col_order[_idx + 1],
                     )
                     st.session_state[_col_order_state_key] = _active_editor_col_order
+                    _persist_view_state(_active_editor_col_order)
                     st.session_state.pop("plan_data_editor", None)
                     st.rerun()
-            if _co3.button("💾 Save Order", key=f"{_col_order_state_key}__save"):
-                if current_user:
-                    db.set_plan_user_preference(
-                        project_id, current_user, _plan_col_pref_key, _active_editor_col_order
-                    )
-                    st.success("Column order saved for your user.")
-                else:
-                    st.warning("Enter your name above to save user preferences.")
-            if _co4.button("↩️ Reset", key=f"{_col_order_state_key}__reset"):
+            if _co3.button("💾 Save Layout", key=f"{_col_order_state_key}__save"):
+                _persist_view_state(_active_editor_col_order)
+                st.success("Table layout saved.")
+            if _co4.button("↩️ Reset Layout", key=f"{_col_order_state_key}__reset"):
                 st.session_state[_col_order_state_key] = _normalize_editor_col_order([])
-                if current_user:
-                    db.set_plan_user_preference(
-                        project_id, current_user, _plan_col_pref_key, st.session_state[_col_order_state_key]
-                    )
+                st.session_state[_visible_cols_state_key] = list(st.session_state[_col_order_state_key])
+                _persist_view_state(st.session_state[_col_order_state_key])
                 st.session_state.pop("plan_data_editor", None)
                 st.rerun()
+
+            _persist_view_state()
+
+        _visible_editor_col_order = [
+            _c for _c in st.session_state[_visible_cols_state_key]
+            if st.session_state[_show_months_key] or _c not in all_months
+        ]
+
+        st.caption(
+            "✏️ Edit task metadata and monthly values directly in the table. "
+            "Add rows at the bottom (**+**). Delete rows with the row-delete icon (✕ on hover). "
+            "Click **💾 Save Changes** to persist."
+        )
 
         if _auto_rate_hours_total:
             _has_labor = not plan_df.empty and any(str(ct).strip().lower() == "labor cost" for ct in plan_df.get("Cost Type", []))
             if _has_labor:
                 st.info(
-                    "💡 **Auto-Calc Modes** (for Labor cost tasks only):\n"
-                    "- **Calculate**: Rate/Hour × Hours(Annual) → Total (auto-distributed to months)\n"
-                    "- **Direct**: Set Total directly; edit monthly values to recalc Total as SUM\n"
+                    "💡 **Auto-Calc Modes**:\n"
+                    "- **Calculated (toggle ON)**: Rate/Hour × Hours(Annual) → Total (auto-distributed to months)\n"
+                    "- **Direct (toggle OFF, default)**: keep month-driven values and derive Total from month sum\n"
                     "Select mode in the '_Auto-Calc Mode (Labor)' column."
                 )
-        _disabled_cols = ["_task_id", "Total (€)"]
-        
-        edited_plan = st.data_editor(
-            plan_df,
-            use_container_width=True,
-            hide_index=True,
-            num_rows="dynamic",
-            column_order=_active_editor_col_order,
-            disabled=_disabled_cols,
-            column_config=_col_conf,
-            key="plan_data_editor",
-        )
 
-        _sv_col, _ = st.columns([1, 5])
-        if _sv_col.button("💾 Save Changes", type="primary", key="save_plan_btn"):
+        def _apply_live_calc_preview(_df_in, _last_edit_hint=None):
+            _df_out = _df_in.copy()
+            if _auto_rate_hours_total and all_months:
+                for _idx, _r in _df_out.iterrows():
+                    _calc_mode = "Calculated" if str(_r.get("_calc_mode", "Direct")).strip().lower() in ("calculate", "calculated", "true", "1", "yes", "on") else "Direct"
+                    _hint_col = (_last_edit_hint or {}).get(_idx, "")
+                    _prev_row = None
+                    if _work_df_key in st.session_state:
+                        _prev_df = st.session_state[_work_df_key]
+                        if isinstance(_prev_df, pd.DataFrame) and _idx < len(_prev_df):
+                            _prev_row = _prev_df.iloc[_idx]
+                    if _calc_mode == "Calculated":
+                        _rate_val = float(_r.get(_rate_col_key, 0.0) or 0.0)
+                        _hours_val = float(_r.get(_hours_col_key, 0.0) or 0.0)
+                        if _rate_val > 0 and _hours_val > 0:
+                            _annual_total = _rate_val * _hours_val
+                            if _total_col_key:
+                                _df_out.at[_idx, _total_col_key] = _annual_total
+                            _per_month = _annual_total / len(all_months)
+                            for _m in all_months:
+                                _df_out.at[_idx, _m] = _per_month
+                        else:
+                            # Lock month/total cells in Calculated mode even when helpers are empty.
+                            # Revert to previous row values if available; otherwise keep them at zero.
+                            if _prev_row is not None:
+                                if _total_col_key:
+                                    _df_out.at[_idx, _total_col_key] = float(_prev_row.get(_total_col_key, 0.0) or 0.0)
+                                for _m in all_months:
+                                    _df_out.at[_idx, _m] = float(_prev_row.get(_m, 0.0) or 0.0)
+                            else:
+                                if _total_col_key:
+                                    _df_out.at[_idx, _total_col_key] = 0.0
+                                for _m in all_months:
+                                    _df_out.at[_idx, _m] = 0.0
+                    elif _calc_mode == "Direct":
+                        _month_sum = sum(float(_r.get(_m, 0.0) or 0.0) for _m in all_months)
+                        _table_total_val = float(_r.get("Total (€)", _month_sum) or 0.0)
+                        _total_val = _table_total_val
+                        if _total_col_key and _hint_col != "Total (€)":
+                            _total_val = float(_r.get(_total_col_key, _month_sum) or 0.0)
+                        _prev_month_sum = _month_sum
+                        _prev_total_val = _total_val
+                        if _prev_row is not None:
+                            _prev_month_sum = sum(float(_prev_row.get(_m, 0.0) or 0.0) for _m in all_months)
+                            _prev_table_total_val = float(_prev_row.get("Total (€)", _prev_month_sum) or 0.0)
+                            _prev_total_val = _prev_table_total_val
+                            if _total_col_key and _hint_col != "Total (€)":
+                                _prev_total_val = float(_prev_row.get(_total_col_key, _prev_month_sum) or 0.0)
+
+                        _month_changed = abs(_month_sum - _prev_month_sum) > 0.001
+                        _total_changed = abs(_total_val - _prev_total_val) > 0.001
+
+                        _total_wins = (_hint_col == "Total (€)")
+                        _months_win = (_hint_col in all_months)
+
+                        if _total_wins or (_total_changed and not _month_changed and not _months_win):
+                            _per_month = (_total_val / len(all_months)) if all_months else 0.0
+                            for _m in all_months:
+                                _df_out.at[_idx, _m] = _per_month
+                            if _total_col_key:
+                                _df_out.at[_idx, _total_col_key] = _total_val
+                        else:
+                            if _total_col_key:
+                                _df_out.at[_idx, _total_col_key] = _month_sum
+                    if _calc_mode == "Calculated":
+                        # Hard lock in-editor for month/total cells: always restore from formula or persisted values.
+                        _rate_val = float(_r.get(_rate_col_key, 0.0) or 0.0)
+                        _hours_val = float(_r.get(_hours_col_key, 0.0) or 0.0)
+                        if not (_rate_val > 0 and _hours_val > 0):
+                            _tid_val = 0
+                            try:
+                                _tid_val = int(float(_r.get("_task_id") or 0))
+                            except Exception:
+                                _tid_val = 0
+                            _p_row = _persisted_by_tid.get(_tid_val)
+                            if _p_row is not None:
+                                if _total_col_key:
+                                    _df_out.at[_idx, _total_col_key] = float(_p_row.get(_total_col_key, 0.0) or 0.0)
+                                for _m in all_months:
+                                    _df_out.at[_idx, _m] = float(_p_row.get(_m, 0.0) or 0.0)
+            if "Total (€)" in _df_out.columns:
+                for _idx, _r in _df_out.iterrows():
+                    _df_out.at[_idx, "Total (€)"] = sum(float(_r.get(_m, 0.0) or 0.0) for _m in all_months)
+            return _df_out
+
+        _work_df_key = f"plan_editor_work_df__{project_id}__{current_user or 'anon'}"
+        _work_sig_key = f"{_work_df_key}__sig"
+        _plan_sig = (
+            tuple(plan_df.get("_task_id", pd.Series(dtype=float)).fillna(0).astype(int).tolist()) if not plan_df.empty else tuple(),
+            tuple(plan_df.columns.tolist()),
+            int(len(plan_df)),
+        )
+        if _work_df_key not in st.session_state or st.session_state.get(_work_sig_key) != _plan_sig:
+            st.session_state[_work_df_key] = _apply_live_calc_preview(plan_df)
+            st.session_state[_work_sig_key] = _plan_sig
+
+        _disabled_cols = ["_task_id"]
+        
+        with _plan_table_slot:
+            edited_plan = st.data_editor(
+                st.session_state[_work_df_key],
+                use_container_width=True,
+                hide_index=True,
+                num_rows="dynamic",
+                column_order=_visible_editor_col_order,
+                disabled=_disabled_cols,
+                column_config=_col_conf,
+                key="plan_data_editor",
+            )
+
+        _editor_state = st.session_state.get("plan_data_editor", {})
+        _last_edit_hint = {}
+        _locked_edit_reverted = False
+        if isinstance(_editor_state, dict):
+            _state_col_order = _editor_state.get("column_order")
+            if isinstance(_state_col_order, list) and _state_col_order:
+                _normalized_from_editor = _normalize_editor_col_order(_state_col_order)
+                if _normalized_from_editor != st.session_state.get(_col_order_state_key, []):
+                    st.session_state[_col_order_state_key] = _normalized_from_editor
+                    _active_editor_col_order = _normalized_from_editor
+                    _persist_view_state(_normalized_from_editor)
+            _edited_rows = _editor_state.get("edited_rows", {})
+            if isinstance(_edited_rows, dict):
+                for _rk, _changes in _edited_rows.items():
+                    try:
+                        _ri = int(_rk)
+                    except Exception:
+                        continue
+                    if not (isinstance(_changes, dict) and _changes):
+                        continue
+                    if _ri < 0 or _ri >= len(edited_plan):
+                        continue
+
+                    _row_mode = "Calculated" if str(edited_plan.iloc[_ri].get("_calc_mode", "Direct")).strip().lower() in ("calculate", "calculated", "true", "1", "yes", "on") else "Direct"
+                    _allowed_keys = list(_changes.keys())
+
+                    if _row_mode == "Calculated":
+                        _locked_cols = [k for k in _changes.keys() if k == "Total (€)" or k in all_months]
+                        if _locked_cols:
+                            _prev_df = st.session_state.get(_work_df_key)
+                            if isinstance(_prev_df, pd.DataFrame) and _ri < len(_prev_df):
+                                for _lk in _locked_cols:
+                                    if _lk in edited_plan.columns and _lk in _prev_df.columns:
+                                        edited_plan.at[_ri, _lk] = _prev_df.iloc[_ri].get(_lk)
+                            _allowed_keys = [k for k in _allowed_keys if k not in _locked_cols]
+                            _locked_edit_reverted = True
+
+                    if _allowed_keys:
+                        _last_edit_hint[_ri] = _allowed_keys[-1]
+
+        if _locked_edit_reverted:
+            st.info("In Calculated mode, month and Total cells are locked. Edit Rate/Hours or switch to Direct mode.")
+
+        with _plan_table_slot:
+            _sv_col, _ = st.columns([1, 5])
+            _save_clicked = _sv_col.button("💾 Save Changes", type="primary", key="save_plan_btn")
+
+        _live_editor_df = _apply_live_calc_preview(edited_plan, _last_edit_hint=_last_edit_hint)
+        if not _live_editor_df.equals(st.session_state[_work_df_key]):
+            st.session_state[_work_df_key] = _live_editor_df
+            if not _save_clicked:
+                st.rerun()
+
+        if _save_clicked:
             if not current_user:
                 st.error("⚠️ Please enter your name (for audit trail) before saving.")
             else:
                 _added = _deleted = _meta_upd = _val_upd = 0
 
-                _save_df = edited_plan.copy()
+                _save_df = st.session_state[_work_df_key].copy()
 
                 def _num_or_zero(v):
                     try:
@@ -717,29 +1439,6 @@ elif page == "📋 Budget Planning":
                         return float(v)
                     except Exception:
                         return 0.0
-
-                # Auto-calculate based on mode and cost type.
-                if _auto_rate_hours_total and all_months:
-                    for _idx, _r in _save_df.iterrows():
-                        _is_labor = str(_r.get("Cost Type", "")).strip().lower() == "labor cost"
-                        _calc_mode = str(_r.get("_calc_mode", "Direct")).strip()
-                        
-                        if _is_labor and _calc_mode == "Calculate":
-                            # Mode 1: Calculate from Rate × Hours
-                            _rate_val = _num_or_zero(_r.get(_rate_col_key, 0.0))
-                            _hours_val = _num_or_zero(_r.get(_hours_col_key, 0.0))
-                            if _rate_val > 0 and _hours_val > 0:
-                                _annual_total = _rate_val * _hours_val
-                                if _total_col_key:
-                                    _save_df.at[_idx, _total_col_key] = _annual_total
-                                _per_month = _annual_total / len(all_months)
-                                for _m in all_months:
-                                    _save_df.at[_idx, _m] = _per_month
-                        elif _is_labor and _calc_mode == "Direct":
-                            # Mode 2: Calculate Total as sum of monthly values
-                            _month_sum = sum(_num_or_zero(_r.get(_m, 0.0)) for _m in all_months)
-                            if _month_sum > 0 and _total_col_key:
-                                _save_df.at[_idx, _total_col_key] = _month_sum
 
                 _orig_df = plan_df
                 _orig_ids = (
@@ -768,6 +1467,34 @@ elif page == "📋 Budget Planning":
 
                 _orig_by_id = _orig_df.set_index("_task_id") if not _orig_df.empty else None
 
+                def _locked_calc_values(_row_s, _old_row_s=None):
+                    _vals = {}
+                    _mode_row = "Calculated" if str(_row_s.get("_calc_mode", "Direct")).strip().lower() in ("calculate", "calculated", "true", "1", "yes", "on") else "Direct"
+                    if _mode_row != "Calculated":
+                        return _vals
+                    _r_val = _num_or_zero(_row_s.get(_rate_col_key, 0.0))
+                    _h_val = _num_or_zero(_row_s.get(_hours_col_key, 0.0))
+                    if _r_val > 0 and _h_val > 0 and all_months:
+                        _annual = _r_val * _h_val
+                        if _total_col_key:
+                            _vals[_total_col_key] = _annual
+                        _per = _annual / len(all_months)
+                        for _m in all_months:
+                            _vals[_m] = _per
+                        return _vals
+                    # If helpers are empty in Calculated mode, keep persisted values (ignore user edits).
+                    if _old_row_s is not None:
+                        if _total_col_key:
+                            _vals[_total_col_key] = _num_or_zero(_old_row_s.get(_total_col_key, 0.0))
+                        for _m in all_months:
+                            _vals[_m] = _num_or_zero(_old_row_s.get(_m, 0.0))
+                    else:
+                        if _total_col_key:
+                            _vals[_total_col_key] = 0.0
+                        for _m in all_months:
+                            _vals[_m] = 0.0
+                    return _vals
+
                 for _, _row in _save_df.iterrows():
                     _raw_id = _row.get("_task_id")
                     try:
@@ -777,7 +1504,7 @@ elif page == "📋 Budget Planning":
 
                     _tname = str(_row.get("Task Name") or "").strip()
                     _ctype = str(_row.get("Cost Type") or "Direct cost").strip() or "Direct cost"
-                    _calc_mo = str(_row.get("_calc_mode", "Direct")).strip()
+                    _calc_mo = "Calculated" if str(_row.get("_calc_mode", "Direct")).strip().lower() in ("calculate", "calculated", "true", "1", "yes", "on") else "Direct"
                     _rg    = str(_row.get("Resource Group") or "").strip()
                     _emps  = str(_row.get("Employees") or "").strip()
 
@@ -788,12 +1515,25 @@ elif page == "📋 Budget Planning":
                         # New task
                         _new_tid = db.add_plan_task(project_id, _tname, _ctype, _rg, _emps)
                         db.add_plan_audit(project_id, _new_tid, _tname, "", "", "", "add_task", current_user)
+                        db.upsert_plan_value(
+                            _new_tid,
+                            _calc_mode_store_key,
+                            1.0 if _calc_mo == "Calculated" else 0.0,
+                            current_user,
+                        )
                         _added += 1
+                        _calc_locked = _locked_calc_values(_row, None)
                         for _ck in _all_value_keys:
-                            _val = float(_row.get(_ck) or 0)
-                            if _val != 0:
-                                db.upsert_plan_value(_new_tid, _ck, _val, current_user)
-                                _val_upd += 1
+                            if _ck in _text_custom_col_keys_set:
+                                _tv = str(_row.get(_ck) or "").strip()
+                                if _tv:
+                                    db.upsert_plan_text_value(_new_tid, _ck, _tv, current_user)
+                                    _val_upd += 1
+                            else:
+                                _val = float(_calc_locked.get(_ck, _row.get(_ck, 0)) or 0)
+                                if _val != 0:
+                                    db.upsert_plan_value(_new_tid, _ck, _val, current_user)
+                                    _val_upd += 1
                     else:
                         # Existing task
                         if _orig_by_id is not None and _tid in _orig_ids:
@@ -804,7 +1544,7 @@ elif page == "📋 Budget Planning":
                                 "Resource Group": _rg,
                                 "Employees": _emps,
                             }
-                            _old_mo = str(_orow.get("_calc_mode", "Direct")).strip()
+                            _old_mo = "Calculated" if str(_orow.get("_calc_mode", "Direct")).strip().lower() in ("calculate", "calculated", "true", "1", "yes", "on") else "Direct"
                             _meta_changed = False
                             for _field, _nv in _fmap.items():
                                 _ov = str(_orow.get(_field) or "").strip()
@@ -817,20 +1557,37 @@ elif page == "📋 Budget Planning":
                                 db.add_plan_audit(
                                     project_id, _tid, _tname, "_calc_mode", _old_mo, _calc_mo, "update_meta", current_user
                                 )
+                                db.upsert_plan_value(
+                                    _tid,
+                                    _calc_mode_store_key,
+                                    1.0 if _calc_mo == "Calculated" else 0.0,
+                                    current_user,
+                                )
                                 _meta_changed = True
                             if _meta_changed:
                                 db.update_plan_task(_tid, _tname, _ctype, _rg, _emps)
                                 _meta_upd += 1
 
+                            _calc_locked = _locked_calc_values(_row, _orow)
                             for _ck in _all_value_keys:
-                                _nv = float(_row.get(_ck) or 0)
-                                _ov = float(_orow.get(_ck) or 0)
-                                if abs(_nv - _ov) > 0.001:
-                                    db.upsert_plan_value(_tid, _ck, _nv, current_user)
-                                    db.add_plan_audit(
-                                        project_id, _tid, _tname, _ck, _ov, _nv, "update", current_user
-                                    )
-                                    _val_upd += 1
+                                if _ck in _text_custom_col_keys_set:
+                                    _nv = str(_row.get(_ck) or "").strip()
+                                    _ov = str(_orow.get(_ck) or "").strip()
+                                    if _nv != _ov:
+                                        db.upsert_plan_text_value(_tid, _ck, _nv, current_user)
+                                        db.add_plan_audit(
+                                            project_id, _tid, _tname, _ck, _ov, _nv, "update", current_user
+                                        )
+                                        _val_upd += 1
+                                else:
+                                    _nv = float(_calc_locked.get(_ck, _row.get(_ck, 0)) or 0)
+                                    _ov = float(_orow.get(_ck) or 0)
+                                    if abs(_nv - _ov) > 0.001:
+                                        db.upsert_plan_value(_tid, _ck, _nv, current_user)
+                                        db.add_plan_audit(
+                                            project_id, _tid, _tname, _ck, _ov, _nv, "update", current_user
+                                        )
+                                        _val_upd += 1
 
                 _parts = []
                 if _added:    _parts.append(f"{_added} task(s) added")
@@ -841,16 +1598,31 @@ elif page == "📋 Budget Planning":
                     st.success("✅ " + " | ".join(_parts))
                 else:
                     st.info("No changes detected.")
+                _order_to_persist = st.session_state.get(_col_order_state_key, _active_editor_col_order)
+                _editor_state_after_save = st.session_state.get("plan_data_editor", {})
+                if isinstance(_editor_state_after_save, dict):
+                    _state_col_order = _editor_state_after_save.get("column_order")
+                    if isinstance(_state_col_order, list) and _state_col_order:
+                        _order_to_persist = _normalize_editor_col_order(_state_col_order)
+                        st.session_state[_col_order_state_key] = _order_to_persist
                 db.set_plan_user_preference(
                     project_id,
-                    current_user,
+                    _view_pref_user,
                     _plan_col_pref_key,
-                    st.session_state.get(_col_order_state_key, _active_editor_col_order),
+                    _order_to_persist,
                 )
+                db.set_plan_user_preference(
+                    project_id,
+                    _view_pref_user,
+                    _plan_show_months_pref_key,
+                    bool(st.session_state.get(_show_months_key, False)),
+                )
+                st.session_state.pop(_work_df_key, None)
+                st.session_state.pop(_work_sig_key, None)
                 st.rerun()
 
         # ── Add Task form ────────────────────────────────────────────────────
-        with st.expander("➕ Add New Task", expanded=plan_df.empty):
+        with st.expander("➕ 3.1.2 Add New Task", expanded=plan_df.empty):
             with st.form("add_task_form"):
                 _at1, _at2 = st.columns(2)
                 _new_tname = _at1.text_input("Task Name *")
@@ -880,7 +1652,7 @@ elif page == "📋 Budget Planning":
 
         # ── Annual distribution ──────────────────────────────────────────────
         if not plan_df.empty:
-            with st.expander("📅 Enter Annual Total (distribute equally across months)"):
+            with st.expander("📅 3.1.3 Enter Annual Total (distribute equally across months)"):
                 st.caption(
                     "Select a task and year, enter the total annual budget. "
                     "The amount will be split equally across all plan months within that year."
@@ -963,179 +1735,260 @@ elif page == "📋 Budget Planning":
                 st.write(f"Preview ({len(df_imp)} rows):", df_imp.head(8))
 
                 _imp_cols = ["(none)"] + list(df_imp.columns)
-                _d_task   = guess_column(df_imp.columns, ["task", "task name", "description", "work package", "wbs"])
-                _d_ct     = guess_column(df_imp.columns, ["cost type", "type", "cost_type", "category"])
-                _d_rg     = guess_column(df_imp.columns, ["resource group", "resource_group", "rg", "team", "department"])
-                _d_emp    = guess_column(df_imp.columns, ["employee", "employees", "resource", "name"])
+                _d_year = guess_column(df_imp.columns, ["year (yyyy)", "year", "yyyy"])
+                _d_month = guess_column(df_imp.columns, ["month (mm)", "month", "mm"])
+                _d_task = guess_column(df_imp.columns, ["task id t", "task id", "task", "task name"])
+                _d_rg_type = guess_column(df_imp.columns, ["sp rg type t", "rg type", "resource group type"])
+                _d_rg = guess_column(df_imp.columns, ["sp rg res group t", "resource group", "res group", "rg"])
+                _d_wbs = guess_column(df_imp.columns, ["wbs element k", "wbs element", "wbs"])
+                _d_mcr_no = guess_column(df_imp.columns, ["prj mcr number", "mcr number", "project mcr"])
+                _d_mcr_name = guess_column(df_imp.columns, ["prj mcr - name", "prj mcr name", "mcr name"])
+                _d_amount = guess_column(df_imp.columns, ["amount", "total", "value"])
+                _d_hours = guess_column(df_imp.columns, ["hours", "hour"])
+                _d_rate = guess_column(df_imp.columns, ["rate", "rate / hour", "rate per hour"])
 
-                st.markdown("**Map metadata columns:**")
-                _mc1, _mc2, _mc3, _mc4 = st.columns(4)
-                _imp_task_col = _mc1.selectbox("Task Name *", _imp_cols, index=_imp_cols.index(_d_task) if _d_task in _imp_cols else 0, key="imp_task_col")
-                _imp_type_col = _mc2.selectbox("Cost Type", _imp_cols, index=_imp_cols.index(_d_ct) if _d_ct in _imp_cols else 0, key="imp_type_col")
-                _imp_rg_col   = _mc3.selectbox("Resource Group", _imp_cols, index=_imp_cols.index(_d_rg) if _d_rg in _imp_cols else 0, key="imp_rg_col")
-                _imp_emp_col  = _mc4.selectbox("Employees", _imp_cols, index=_imp_cols.index(_d_emp) if _d_emp in _imp_cols else 0, key="imp_emp_col")
-                _mc5, _mc6, _mc7 = st.columns(3)
-                _imp_hours_col = _mc5.selectbox("Hours (annually)", _imp_cols, index=0, key="imp_hours_col")
-                _imp_rate_col  = _mc6.selectbox("Rate / hour (€)", _imp_cols, index=0, key="imp_rate_col")
-                _imp_total_col = _mc7.selectbox("Total (€)", _imp_cols, index=0, key="imp_total_col")
+                st.markdown("**3.2.1 Map row-based import columns:**")
+                _r1, _r2, _r3, _r4 = st.columns(4)
+                _imp_year_col = _r1.selectbox("Year (YYYY) *", _imp_cols, index=_imp_cols.index(_d_year) if _d_year in _imp_cols else 0, key="imp_row_year_col")
+                _imp_month_col = _r2.selectbox("Month (MM) *", _imp_cols, index=_imp_cols.index(_d_month) if _d_month in _imp_cols else 0, key="imp_row_month_col")
+                _imp_task_col = _r3.selectbox("Task ID T *", _imp_cols, index=_imp_cols.index(_d_task) if _d_task in _imp_cols else 0, key="imp_row_task_col")
+                _imp_amount_col = _r4.selectbox("Amount *", _imp_cols, index=_imp_cols.index(_d_amount) if _d_amount in _imp_cols else 0, key="imp_row_amount_col")
 
-                _helper_custom_keys = {"hours_annually", "rate_per_hour", "total"}
-                _helper_aliases = {
-                    "rate / hour", "rate per hour", "hourly rate", "rate hour", "rate",
-                    "hours (annually)", "hours annually", "annual hours", "hours annual", "hours year", "yearly hours",
-                    "total", "total annual", "annual total", "total annual cost", "annual cost",
-                }
-                _helper_alias_norm = {_norm_label(v) for v in _helper_aliases}
-                _extra_custom_cols = [
-                    c for c in _custom_cols_meta
-                    if c["col_key"] not in _helper_custom_keys
-                    and _norm_label(c.get("col_label") or c["col_key"]) not in _helper_alias_norm
-                ]
-                _extra_custom_sel = {}
-                if _extra_custom_cols:
-                    st.markdown("**Map additional custom columns:**")
-                    _extra_per_row = 3
-                    for _i, _cc in enumerate(_extra_custom_cols):
-                        if _i % _extra_per_row == 0:
-                            _crow = st.columns(_extra_per_row)
-                        _cidx = _i % _extra_per_row
-                        _cc_label = _cc.get("col_label") or _cc["col_key"]
-                        _default_col = guess_column(
-                            df_imp.columns,
-                            [_cc_label, _cc["col_key"], _cc_label.replace("_", " ")],
-                        )
-                        _extra_custom_sel[_cc["col_key"]] = _crow[_cidx].selectbox(
-                            _cc_label,
-                            _imp_cols,
-                            index=_imp_cols.index(_default_col) if _default_col in _imp_cols else 0,
-                            key=f"imp_custom_{_cc['col_key']}",
-                        )
+                _r5, _r6, _r7, _r8 = st.columns(4)
+                _imp_rg_type_col = _r5.selectbox("SP RG Type T", _imp_cols, index=_imp_cols.index(_d_rg_type) if _d_rg_type in _imp_cols else 0, key="imp_row_rg_type_col")
+                _imp_rg_col = _r6.selectbox("SP RG Res Group T", _imp_cols, index=_imp_cols.index(_d_rg) if _d_rg in _imp_cols else 0, key="imp_row_rg_col")
+                _imp_wbs_col = _r7.selectbox("WBS Element K", _imp_cols, index=_imp_cols.index(_d_wbs) if _d_wbs in _imp_cols else 0, key="imp_row_wbs_col")
+                _imp_hours_col = _r8.selectbox("Hours", _imp_cols, index=_imp_cols.index(_d_hours) if _d_hours in _imp_cols else 0, key="imp_row_hours_col")
 
-                _meta_used = {
-                    c
-                    for c in [_imp_task_col, _imp_type_col, _imp_rg_col, _imp_emp_col, _imp_hours_col, _imp_rate_col, _imp_total_col]
-                    if c != "(none)"
-                }
-                _meta_used.update(v for v in _extra_custom_sel.values() if v != "(none)")
-                _remaining = [c for c in df_imp.columns if c not in _meta_used]
-
-                # Auto-detect month columns
-                def _try_parse_ym(col_name):
-                    try:
-                        return pd.to_datetime(str(col_name).strip()).strftime("%Y-%m")
-                    except Exception:
-                        return None
-
-                _auto_map = {}
-                for _c in _remaining:
-                    _ym = _try_parse_ym(_c)
-                    if _ym and _ym in all_months:
-                        _auto_map[_ym] = _c
-
-                st.markdown("**Map value columns to plan months:**")
-                st.caption("Auto-detected where possible. Leave as (none) to skip a month.")
-                _val_cols = ["(none)"] + _remaining
-                _month_sel = {}
-                _mcols_per_row = 6
-                for _i, _ym in enumerate(all_months):
-                    if _i % _mcols_per_row == 0:
-                        _mrow = st.columns(_mcols_per_row)
-                    _def = _auto_map.get(_ym, "(none)")
-                    _month_sel[_ym] = _mrow[_i % _mcols_per_row].selectbox(
-                        _month_label(_ym), _val_cols,
-                        index=_val_cols.index(_def) if _def in _val_cols else 0,
-                        key=f"imp_month_{_ym}",
-                    )
+                _r9, _r10, _r11 = st.columns(3)
+                _imp_rate_col = _r9.selectbox("Rate", _imp_cols, index=_imp_cols.index(_d_rate) if _d_rate in _imp_cols else 0, key="imp_row_rate_col")
+                _imp_mcr_no_col = _r10.selectbox("PRJ MCR number", _imp_cols, index=_imp_cols.index(_d_mcr_no) if _d_mcr_no in _imp_cols else 0, key="imp_row_mcr_no_col")
+                _imp_mcr_name_col = _r11.selectbox("PRJ MCR - Name", _imp_cols, index=_imp_cols.index(_d_mcr_name) if _d_mcr_name in _imp_cols else 0, key="imp_row_mcr_name_col")
 
                 _def_ctype = st.selectbox(
-                    "Default Cost Type (when column is empty/missing)",
+                    "Default Cost Type",
                     ["Direct cost", "Labor cost"],
-                    key="imp_default_ct",
+                    key="imp_row_default_ct",
                 )
 
-                if st.button("⬇️ Import to Plan", key="do_plan_import"):
+                if st.button("⬇️ Import row-based plan", key="do_plan_row_import"):
                     if not current_user:
                         st.error("Please set your name for the audit trail.")
-                    elif _imp_task_col == "(none)":
-                        st.error("Task Name column is required.")
+                    elif _imp_year_col == "(none)" or _imp_month_col == "(none)" or _imp_task_col == "(none)" or _imp_amount_col == "(none)":
+                        st.error("Year, Month, Task ID T, and Amount mappings are required.")
                     else:
-                        # Ensure custom columns exist for Hours, Rate, Total
+                        # Ensure helper and metadata custom columns exist.
                         _hours_key = "hours_annually"
                         _rate_key = "rate_per_hour"
                         _total_key = "total"
-                        if _imp_hours_col != "(none)":
-                            db.add_plan_column(project_id, _hours_key, "Hours (annually)", col_type="custom", sort_order=60)
-                        if _imp_rate_col != "(none)":
-                            db.add_plan_column(project_id, _rate_key, "Rate / hour", col_type="custom", sort_order=59)
-                        if _imp_total_col != "(none)":
-                            db.add_plan_column(project_id, _total_key, "Total", col_type="custom", sort_order=61)
-                        _imp_tasks = _imp_vals = _imp_skip = 0
-                        for _, _ir in df_imp.iterrows():
-                            _tval = str(_ir[_imp_task_col]).strip() if _imp_task_col != "(none)" else ""
-                            if not _tval or _tval.lower() in ("nan", "none", ""):
-                                _imp_skip += 1
-                                continue
-                            _ctval = str(_ir[_imp_type_col]).strip() if _imp_type_col != "(none)" else _def_ctype
-                            if _ctval.lower() not in ("labor cost", "direct cost"):
-                                _ctval = _def_ctype
-                            _rgval  = "" if _imp_rg_col  == "(none)" else str(_ir[_imp_rg_col]).strip()
-                            _empval = "" if _imp_emp_col == "(none)" else str(_ir[_imp_emp_col]).strip()
-                            _rgval  = "" if _rgval.lower()  in ("nan", "none") else _rgval
-                            _empval = "" if _empval.lower() in ("nan", "none") else _empval
+                        _mcr_no_key = "custom_project_mcr"
+                        _mcr_name_key = "prj_mcr_name"
+                        _wbs_key = "wbs_element_k"
+                        _rg_type_key = "sp_rg_type_t"
 
-                            _new_tid = db.add_plan_task(project_id, _tval, _ctval, _rgval, _empval)
-                            db.add_plan_audit(project_id, _new_tid, _tval, "", "", "", "import", current_user)
+                        if _imp_hours_col != "(none)":
+                            db.add_plan_column(project_id, _hours_key, "Hours (annually)", col_type="custom", data_type="decimal", sort_order=60)
+                        if _imp_rate_col != "(none)":
+                            db.add_plan_column(project_id, _rate_key, "Rate / hour", col_type="custom", data_type="currency_eur", sort_order=59)
+                        db.add_plan_column(project_id, _total_key, "Total", col_type="custom", data_type="currency_eur", sort_order=61)
+                        if _imp_mcr_no_col != "(none)":
+                            db.add_plan_column(project_id, _mcr_no_key, "Project MCR #", col_type="custom", data_type="text", sort_order=70)
+                        if _imp_mcr_name_col != "(none)":
+                            db.add_plan_column(project_id, _mcr_name_key, "PRJ MCR - Name", col_type="custom", data_type="text", sort_order=71)
+                        if _imp_wbs_col != "(none)":
+                            db.add_plan_column(project_id, _wbs_key, "WBS Element K", col_type="custom", data_type="text", sort_order=72)
+                        if _imp_rg_type_col != "(none)":
+                            db.add_plan_column(project_id, _rg_type_key, "SP RG Type T", col_type="custom", data_type="text", sort_order=73)
+
+                        def _clean_text(_v):
+                            if pd.isna(_v):
+                                return ""
+                            _s = str(_v).strip()
+                            return "" if _s.lower() in ("nan", "none") else _s
+
+                        def _parse_year_month(_y_raw, _m_raw):
+                            _y = pd.to_numeric(pd.Series([_y_raw]), errors="coerce").iloc[0]
+                            _m = pd.to_numeric(pd.Series([_m_raw]), errors="coerce").iloc[0]
+                            if pd.isna(_y) or pd.isna(_m):
+                                try:
+                                    _dt = pd.to_datetime(f"{str(_y_raw).strip()}-{str(_m_raw).strip()}-01", errors="coerce")
+                                    if pd.isna(_dt):
+                                        return None
+                                    return _dt.strftime("%Y-%m")
+                                except Exception:
+                                    return None
+                            _yy = int(float(_y))
+                            _mm = int(float(_m))
+                            if _yy < 100:
+                                _yy += 2000
+                            if _mm < 1 or _mm > 12:
+                                return None
+                            return f"{_yy:04d}-{_mm:02d}"
+
+                        _agg = {}
+                        _skipped_empty = 0
+                        _skipped_month = 0
+                        for _, _ir in df_imp.iterrows():
+                            _task_name = _clean_text(_ir[_imp_task_col])
+                            if not _task_name:
+                                _skipped_empty += 1
+                                continue
+
+                            _ym = _parse_year_month(_ir[_imp_year_col], _ir[_imp_month_col])
+                            if not _ym or _ym not in all_months:
+                                _skipped_month += 1
+                                continue
+
+                            _amt = parse_amount(_ir[_imp_amount_col])
+                            if _amt is None:
+                                _amt = 0.0
+
+                            _rg_type = _clean_text(_ir[_imp_rg_type_col]) if _imp_rg_type_col != "(none)" else ""
+                            _rg = _clean_text(_ir[_imp_rg_col]) if _imp_rg_col != "(none)" else ""
+                            _wbs = _clean_text(_ir[_imp_wbs_col]) if _imp_wbs_col != "(none)" else ""
+                            _mcr_no = _clean_text(_ir[_imp_mcr_no_col]) if _imp_mcr_no_col != "(none)" else ""
+                            _mcr_name = _clean_text(_ir[_imp_mcr_name_col]) if _imp_mcr_name_col != "(none)" else ""
+                            _hours = parse_amount(_ir[_imp_hours_col]) if _imp_hours_col != "(none)" else None
+                            _rate = parse_amount(_ir[_imp_rate_col]) if _imp_rate_col != "(none)" else None
+
+                            _rt = _rg_type.lower()
+                            _ctype = "Labor cost" if _rt == "human" else "Direct cost"
+
+                            _k = (_task_name, _ctype, _rg)
+                            if _k not in _agg:
+                                _agg[_k] = {
+                                    "task_name": _task_name,
+                                    "cost_type": _ctype,
+                                    "resource_group": _rg,
+                                    "months": {},
+                                    "hours_sum": 0.0,
+                                    "rate_weighted": 0.0,
+                                    "rate_hours": 0.0,
+                                    "rate_samples": [],
+                                    "amount_total": 0.0,
+                                    "mcr_no": _mcr_no,
+                                    "mcr_name": _mcr_name,
+                                    "wbs": _wbs,
+                                    "rg_type": _rg_type,
+                                }
+                            _e = _agg[_k]
+                            _e["months"][_ym] = float(_e["months"].get(_ym, 0.0) or 0.0) + float(_amt)
+                            _e["amount_total"] += float(_amt)
+                            if _hours is not None:
+                                _e["hours_sum"] += float(_hours)
+                            if _rate is not None:
+                                if _hours is not None and float(_hours) != 0:
+                                    _e["rate_weighted"] += float(_rate) * float(_hours)
+                                    _e["rate_hours"] += float(_hours)
+                                else:
+                                    _e["rate_samples"].append(float(_rate))
+                            if not _e["mcr_no"] and _mcr_no:
+                                _e["mcr_no"] = _mcr_no
+                            if not _e["mcr_name"] and _mcr_name:
+                                _e["mcr_name"] = _mcr_name
+                            if not _e["wbs"] and _wbs:
+                                _e["wbs"] = _wbs
+                            if not _e["rg_type"] and _rg_type:
+                                _e["rg_type"] = _rg_type
+
+                        _imp_tasks = 0
+                        _imp_vals = 0
+                        for _e in _agg.values():
+                            _new_tid = db.add_plan_task(
+                                project_id,
+                                _e["task_name"],
+                                _e["cost_type"],
+                                _e["resource_group"],
+                                "",
+                            )
+                            db.add_plan_audit(project_id, _new_tid, _e["task_name"], "", "", "", "import", current_user)
                             _imp_tasks += 1
 
-                            # Import Hours, Rate, Total if mapped
-                            if _imp_hours_col != "(none)" and _imp_hours_col in df_imp.columns:
-                                _hours_val = parse_amount(_ir[_imp_hours_col])
-                                if _hours_val is not None and _hours_val != 0:
-                                    db.upsert_plan_value(_new_tid, _hours_key, _hours_val, current_user)
-                                    db.add_plan_audit(project_id, _new_tid, _tval, _hours_key, 0, _hours_val, "import", current_user)
-                                    _imp_vals += 1
-                            if _imp_rate_col != "(none)" and _imp_rate_col in df_imp.columns:
-                                _rate_val = parse_amount(_ir[_imp_rate_col])
-                                if _rate_val is not None and _rate_val != 0:
-                                    db.upsert_plan_value(_new_tid, _rate_key, _rate_val, current_user)
-                                    db.add_plan_audit(project_id, _new_tid, _tval, _rate_key, 0, _rate_val, "import", current_user)
-                                    _imp_vals += 1
-                            if _imp_total_col != "(none)" and _imp_total_col in df_imp.columns:
-                                _total_val = parse_amount(_ir[_imp_total_col])
-                                if _total_val is not None and _total_val != 0:
-                                    db.upsert_plan_value(_new_tid, _total_key, _total_val, current_user)
-                                    db.add_plan_audit(project_id, _new_tid, _tval, _total_key, 0, _total_val, "import", current_user)
-                                    _imp_vals += 1
-                                    # Distribute total equally across months if no month columns are mapped
-                                    _any_month_mapped = any(v != "(none)" for v in _month_sel.values())
-                                    if not _any_month_mapped and all_months:
-                                        _per_month = _total_val / len(all_months)
-                                        for _ym in all_months:
-                                            db.upsert_plan_value(_new_tid, _ym, _per_month, current_user)
-                                            db.add_plan_audit(project_id, _new_tid, _tval, _ym, 0, _per_month, "import", current_user)
-                                            _imp_vals += 1
+                            _is_human = str(_e.get("rg_type", "") or "").strip().lower() == "human"
+                            _calc_mode_import = "Calculated" if _is_human else "Direct"
+                            db.upsert_plan_value(
+                                _new_tid,
+                                _calc_mode_store_key,
+                                1.0 if _calc_mode_import == "Calculated" else 0.0,
+                                current_user,
+                            )
+                            db.add_plan_audit(
+                                project_id,
+                                _new_tid,
+                                _e["task_name"],
+                                "_calc_mode",
+                                "",
+                                _calc_mode_import,
+                                "import",
+                                current_user,
+                            )
+                            _imp_vals += 1
 
-                            for _ck, _src_col in _extra_custom_sel.items():
-                                if _src_col != "(none)" and _src_col in df_imp.columns:
-                                    _cv = parse_amount(_ir[_src_col])
-                                    if _cv is not None and _cv != 0:
-                                        db.upsert_plan_value(_new_tid, _ck, _cv, current_user)
-                                        db.add_plan_audit(project_id, _new_tid, _tval, _ck, 0, _cv, "import", current_user)
+                            _rate_final = None
+                            if _imp_rate_col != "(none)":
+                                if _e["rate_hours"] > 0:
+                                    _rate_final = _e["rate_weighted"] / _e["rate_hours"]
+                                elif _e["rate_samples"]:
+                                    _rate_final = sum(_e["rate_samples"]) / len(_e["rate_samples"])
+
+                            if _calc_mode_import == "Calculated":
+                                _months_for_dist = sorted(_e["months"].keys()) if _e["months"] else list(all_months)
+                                _calc_total = float(_e["amount_total"])
+                                if _rate_final is not None and float(_e["hours_sum"]) != 0:
+                                    _calc_total = float(_rate_final) * float(_e["hours_sum"])
+                                _per_month = (_calc_total / len(_months_for_dist)) if _months_for_dist else 0.0
+                                for _ym in _months_for_dist:
+                                    db.upsert_plan_value(_new_tid, _ym, float(_per_month), current_user)
+                                    db.add_plan_audit(project_id, _new_tid, _e["task_name"], _ym, 0, float(_per_month), "import", current_user)
+                                    _imp_vals += 1
+                                db.upsert_plan_value(_new_tid, _total_key, float(_calc_total), current_user)
+                                db.add_plan_audit(project_id, _new_tid, _e["task_name"], _total_key, 0, float(_calc_total), "import", current_user)
+                                _imp_vals += 1
+                            else:
+                                for _ym, _v in _e["months"].items():
+                                    if _v != 0:
+                                        db.upsert_plan_value(_new_tid, _ym, float(_v), current_user)
+                                        db.add_plan_audit(project_id, _new_tid, _e["task_name"], _ym, 0, float(_v), "import", current_user)
                                         _imp_vals += 1
 
-                            for _ym, _src in _month_sel.items():
-                                if _src != "(none)" and _src in df_imp.columns:
-                                    _amt = parse_amount(_ir[_src])
-                                    if _amt is not None and _amt != 0:
-                                        db.upsert_plan_value(_new_tid, _ym, _amt, current_user)
-                                        db.add_plan_audit(
-                                            project_id, _new_tid, _tval, _ym, 0, _amt, "import", current_user
-                                        )
-                                        _imp_vals += 1
+                                _direct_total = float(sum(float(_v or 0.0) for _v in _e["months"].values()))
+                                db.upsert_plan_value(_new_tid, _total_key, _direct_total, current_user)
+                                db.add_plan_audit(project_id, _new_tid, _e["task_name"], _total_key, 0, _direct_total, "import", current_user)
+                                _imp_vals += 1
 
-                        st.success(f"Imported {_imp_tasks} tasks with {_imp_vals} monthly values.")
-                        if _imp_skip:
-                            st.warning(f"Skipped {_imp_skip} empty rows.")
+                            if _imp_hours_col != "(none)" and _e["hours_sum"] != 0:
+                                db.upsert_plan_value(_new_tid, _hours_key, float(_e["hours_sum"]), current_user)
+                                db.add_plan_audit(project_id, _new_tid, _e["task_name"], _hours_key, 0, float(_e["hours_sum"]), "import", current_user)
+                                _imp_vals += 1
+
+                            if _imp_rate_col != "(none)":
+                                if _rate_final is not None:
+                                    db.upsert_plan_value(_new_tid, _rate_key, float(_rate_final), current_user)
+                                    db.add_plan_audit(project_id, _new_tid, _e["task_name"], _rate_key, 0, float(_rate_final), "import", current_user)
+                                    _imp_vals += 1
+
+                            if _imp_mcr_no_col != "(none)" and _e["mcr_no"]:
+                                db.upsert_plan_text_value(_new_tid, _mcr_no_key, _e["mcr_no"], current_user)
+                                db.add_plan_audit(project_id, _new_tid, _e["task_name"], _mcr_no_key, "", _e["mcr_no"], "import", current_user)
+                                _imp_vals += 1
+                            if _imp_mcr_name_col != "(none)" and _e["mcr_name"]:
+                                db.upsert_plan_text_value(_new_tid, _mcr_name_key, _e["mcr_name"], current_user)
+                                db.add_plan_audit(project_id, _new_tid, _e["task_name"], _mcr_name_key, "", _e["mcr_name"], "import", current_user)
+                                _imp_vals += 1
+                            if _imp_wbs_col != "(none)" and _e["wbs"]:
+                                db.upsert_plan_text_value(_new_tid, _wbs_key, _e["wbs"], current_user)
+                                db.add_plan_audit(project_id, _new_tid, _e["task_name"], _wbs_key, "", _e["wbs"], "import", current_user)
+                                _imp_vals += 1
+                            if _imp_rg_type_col != "(none)" and _e["rg_type"]:
+                                db.upsert_plan_text_value(_new_tid, _rg_type_key, _e["rg_type"], current_user)
+                                db.add_plan_audit(project_id, _new_tid, _e["task_name"], _rg_type_key, "", _e["rg_type"], "import", current_user)
+                                _imp_vals += 1
+
+                        st.success(f"Imported {_imp_tasks} tasks with {_imp_vals} values from row-based file.")
+                        if _skipped_empty:
+                            st.warning(f"Skipped {_skipped_empty} rows with empty task.")
+                        if _skipped_month:
+                            st.warning(f"Skipped {_skipped_month} rows with invalid/out-of-range Year-Month.")
                         st.session_state.pop("plan_data_editor", None)
                         st.rerun()
 
@@ -1150,7 +2003,7 @@ elif page == "📋 Budget Planning":
             "Freeze the current budget plan as a named baseline. "
             "Baselines are read-only snapshots that can be downloaded for MCR or archival."
         )
-        with st.expander("🧊 Create / Update Baseline", expanded=True):
+        with st.expander("🧊 3.3.1 Create / Update Baseline", expanded=True):
             _common_bl = ["BP26", "CF01", "CF02", "CF03", "CF04", "CF05",
                           "CF06", "CF07", "CF08", "CF09", "CF10", "CF11", "CF12", "Custom..."]
             with st.form("create_baseline_form"):
@@ -1182,7 +2035,7 @@ elif page == "📋 Budget Planning":
 
         _baselines = db.get_plan_baselines(project_id)
         if _baselines:
-            st.markdown(f"**Existing baselines ({len(_baselines)}):**")
+            st.markdown(f"**3.3.2 Existing baselines ({len(_baselines)}):**")
             for _bl in _baselines:
                 with st.expander(
                     f"🧊 {_bl['baseline_name']} — {_bl['created_at'][:10]} by {_bl['created_by'] or '(unknown)'}"
@@ -1229,27 +2082,58 @@ elif page == "📋 Budget Planning":
             "Month columns are derived automatically from the project start/end dates. "
             "Add custom columns below (e.g. headcount, contingency %, notes)."
         )
-        st.markdown(f"**Month columns:** {', '.join(f'`{_month_label(m)}`' for m in all_months)}")
+        st.markdown(f"**3.4.1 Month columns:** {', '.join(f'`{_month_label(m)}`' for m in all_months)}")
         st.markdown("---")
-        st.markdown("**Custom columns:**")
+        st.markdown("**3.4.2 Custom columns:**")
+        _dtype_options = ["decimal", "integer", "currency_eur", "text"]
+        _dtype_labels = {
+            "decimal": "decimal",
+            "integer": "integer",
+            "currency_eur": "currency (EUR)",
+            "text": "text",
+        }
+
+        def _format_dtype(_dtype_key):
+            return _dtype_labels.get(_dtype_key, _dtype_key)
+
         with st.form("add_col_form"):
-            _cc1, _cc2 = st.columns(2)
+            _cc1, _cc2, _cc3 = st.columns(3)
             _new_cl = _cc1.text_input("Column Label *", placeholder="e.g. Headcount FTE")
             _new_ck = _cc2.text_input("Column key (auto if blank)", placeholder="e.g. headcount_fte")
+            _new_dt = _cc3.selectbox(
+                "Data Type",
+                _dtype_options,
+                key="new_col_data_type",
+                format_func=_format_dtype,
+            )
             if st.form_submit_button("➕ Add Column"):
                 if not _new_cl.strip():
                     st.error("Column label is required.")
                 else:
                     _ck_auto = default_plan_column_key(_new_cl.strip(), _new_ck.strip())
-                    db.add_plan_column(project_id, _ck_auto, _new_cl.strip())
+                    db.add_plan_column(project_id, _ck_auto, _new_cl.strip(), data_type=_new_dt)
                     st.success(f"Added column: **{_new_cl.strip()}**")
                     st.rerun()
 
         if _custom_cols_meta:
             for _cc in _custom_cols_meta:
-                _cca, _ccb = st.columns([4, 1])
-                _cca.write(f"**{_cc['col_label']}** (key: `{_cc['col_key']}`")
-                if _ccb.button("🗑️ Delete", key=f"del_col_{_cc['id']}"):
+                _cca, _ccb, _ccc, _ccd = st.columns([4, 2, 1, 1])
+                _cca.write(f"**{_cc['col_label']}** (key: `{_cc['col_key']}`)")
+                _dtype_val = (_cc.get("data_type") or "decimal").lower()
+                _dtype_idx = _dtype_options.index(_dtype_val) if _dtype_val in _dtype_options else 0
+                _new_dtype_val = _ccb.selectbox(
+                    "Data Type",
+                    _dtype_options,
+                    index=_dtype_idx,
+                    key=f"col_dtype_{_cc['id']}",
+                    label_visibility="collapsed",
+                    format_func=_format_dtype,
+                )
+                if _ccc.button("💾 Type", key=f"save_col_dtype_{_cc['id']}"):
+                    db.update_plan_column_data_type(_cc["id"], _new_dtype_val)
+                    st.success(f"Updated data type: {_cc['col_label']} -> {_new_dtype_val}")
+                    st.rerun()
+                if _ccd.button("🗑️ Delete", key=f"del_col_{_cc['id']}"):
                     db.delete_plan_column(_cc["id"])
                     st.success(f"Deleted column: {_cc['col_label']}")
                     st.rerun()
@@ -1260,7 +2144,7 @@ elif page == "📋 Budget Planning":
     # TAB: Audit Log
     # ════════════════════════════════════════════════════════════════════════
     with tab_audit:
-        st.markdown("Full history of all plan changes — who changed what and when.")
+        st.markdown("3.5.1 Full history of all plan changes — who changed what and when.")
         _audit_rows = db.get_plan_audit_log(project_id, limit=500)
         if _audit_rows:
             _df_audit = pd.DataFrame(_audit_rows)[
@@ -1289,12 +2173,18 @@ elif page == "📋 Budget Planning":
 # 4. ACTUALS
 # ════════════════════════════════════════════════════════════════════════════
 elif page == "📥 Actuals":
-    st.title("📥 Actuals Entry")
+    st.title("📥 4. Actuals Entry")
+    st.caption("Reference: 4.1 Manual Entry | 4.2 Import | 4.3 Mapping | 4.4 View Actuals")
     project_id, project = select_project()
     if not project_id:
         st.stop()
 
-    tab1, tab2, tab3, tab4 = st.tabs(["✏️ Manual Entry", "📂 Import from CSV/Excel (MCR)", "🗺️ Mapping", "👀 View Actuals"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "✏️ 4.1 Manual Entry",
+        "📂 4.2 Import from CSV/Excel (MCR)",
+        "🗺️ 4.3 Mapping",
+        "👀 4.4 View Actuals",
+    ])
 
     with tab1:
         with st.form("add_actual_form"):
@@ -1310,8 +2200,8 @@ elif page == "📥 Actuals":
 
     with tab2:
         import_cost_tab, import_labour_tab = st.tabs([
-            "💳 Other Cost Actuals Import",
-            "👷 Employee (Labour) Actuals Import",
+            "💳 4.2.1 Other Cost Actuals Import",
+            "👷 4.2.2 Employee (Labour) Actuals Import",
         ])
 
         with import_cost_tab:
@@ -1323,26 +2213,51 @@ elif page == "📥 Actuals":
                     st.write("Preview (first 5 rows):", df_up.head())
 
                     cols = ["(none)"] + list(df_up.columns)
-                    default_category = guess_column(df_up.columns, ["category", "cost type", "cost_category", "cost element", "expense type"])
                     default_amount = guess_column(df_up.columns, ["amount", "cost", "value", "actuals", "actual amount", "booked amount"])
-                    default_date = guess_column(df_up.columns, ["date", "booking date", "posting date", "document date", "period"])
-                    default_desc = guess_column(df_up.columns, ["description", "task", "text", "comment", "note", "item"])
+                    default_task_name = guess_column(df_up.columns, ["task", "task name", "work package", "activity"])
+                    default_booking_year = guess_column(df_up.columns, ["booking year", "year", "fiscal year"])
+                    default_booking_month = guess_column(df_up.columns, ["booking month", "month", "fiscal month", "period month"])
+                    default_fin_document = guess_column(df_up.columns, ["financial document", "document", "document number", "invoice", "invoice number"])
+                    default_fin_posting_date = guess_column(df_up.columns, ["financial document posting date", "posting date", "document date", "invoice date", "issue date"])
+                    default_project_no = guess_column(df_up.columns, ["project no", "project_no", "project", "project number"])
+                    default_category = guess_column(df_up.columns, ["category", "cost category", "cost type", "type"])
+                    default_wbs_number = guess_column(df_up.columns, ["wbs", "wbs number", "wbs element", "wbs no"])
+                    default_rg = guess_column(df_up.columns, ["resource group", "resource_group", "rg", "team", "cost center"])
 
                     profiles = db.get_import_profiles("actuals_cost")
                     profile_names = [p["profile_name"] for p in profiles]
                     selected_profile = st.selectbox("Cost import profile", ["(none)"] + profile_names, key="cost_profile_select")
                     selected_settings = next((p["settings"] for p in profiles if p["profile_name"] == selected_profile), {}) if selected_profile != "(none)" else {}
 
-                    mc1, mc2, mc3, mc4 = st.columns(4)
+                    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
                     col_map = {}
-                    col_map["category"] = mc1.selectbox("Category -> App Category", cols, index=cols.index(selected_settings.get("col_map", {}).get("category", default_category)) if selected_settings.get("col_map", {}).get("category", default_category) in cols else 0, key="cost_map_cat")
-                    col_map["amount"] = mc2.selectbox("Amount -> App Amount", cols, index=cols.index(selected_settings.get("col_map", {}).get("amount", default_amount)) if selected_settings.get("col_map", {}).get("amount", default_amount) in cols else 0, key="cost_map_amt")
-                    col_map["date"] = mc3.selectbox("Date -> App Date", cols, index=cols.index(selected_settings.get("col_map", {}).get("date", default_date)) if selected_settings.get("col_map", {}).get("date", default_date) in cols else 0, key="cost_map_date")
-                    col_map["description"] = mc4.selectbox("Description -> App Description", cols, index=cols.index(selected_settings.get("col_map", {}).get("description", default_desc)) if selected_settings.get("col_map", {}).get("description", default_desc) in cols else 0, key="cost_map_desc")
+                    pref_amount = selected_settings.get("col_map", {}).get("amount", default_amount)
+                    pref_task_name = selected_settings.get("col_map", {}).get("task_name", default_task_name)
+                    pref_booking_year = selected_settings.get("col_map", {}).get("booking_year", default_booking_year)
+                    pref_booking_month = selected_settings.get("col_map", {}).get("booking_month", default_booking_month)
+                    pref_fin_document = selected_settings.get("col_map", {}).get("financial_document", default_fin_document)
+                    pref_fin_posting_date = selected_settings.get("col_map", {}).get("financial_document_posting_date", default_fin_posting_date)
+                    pref_project_no = selected_settings.get("col_map", {}).get("project_no", default_project_no)
+                    pref_category = selected_settings.get("col_map", {}).get("category", default_category)
+                    pref_wbs_number = selected_settings.get("col_map", {}).get("wbs_number", default_wbs_number)
+                    pref_rg = selected_settings.get("col_map", {}).get("resource_group", default_rg)
 
-                    oc1, oc2 = st.columns(2)
-                    default_category_if_missing = oc1.selectbox("Default category if missing", CATEGORIES, index=CATEGORIES.index(selected_settings.get("default_category_if_missing", "Other")) if selected_settings.get("default_category_if_missing", "Other") in CATEGORIES else CATEGORIES.index("Other"), key="cost_default_cat")
-                    amount_mode = oc2.selectbox("Amount sign handling", ["Keep as in file", "Convert to positive (absolute)", "Invert sign"], index=["Keep as in file", "Convert to positive (absolute)", "Invert sign"].index(selected_settings.get("amount_mode", "Keep as in file")) if selected_settings.get("amount_mode", "Keep as in file") in ["Keep as in file", "Convert to positive (absolute)", "Invert sign"] else 0, key="cost_amt_mode")
+                    col_map["resource_group"] = mc1.selectbox("Resource group", cols, index=cols.index(pref_rg) if pref_rg in cols else 0, key="cost_map_rg")
+                    col_map["project_no"] = mc2.selectbox("Project no.", cols, index=cols.index(pref_project_no) if pref_project_no in cols else 0, key="cost_map_project")
+                    col_map["wbs_number"] = mc3.selectbox("WBS Number", cols, index=cols.index(pref_wbs_number) if pref_wbs_number in cols else 0, key="cost_map_wbs")
+                    col_map["task_name"] = mc4.selectbox("Task name", cols, index=cols.index(pref_task_name) if pref_task_name in cols else 0, key="cost_map_task")
+                    col_map["amount"] = mc5.selectbox("Cost (EUR)", cols, index=cols.index(pref_amount) if pref_amount in cols else 0, key="cost_map_amt")
+
+                    oc1, oc2, oc3, oc4, oc5 = st.columns(5)
+                    col_map["booking_year"] = oc1.selectbox("Booking year", cols, index=cols.index(pref_booking_year) if pref_booking_year in cols else 0, key="cost_map_book_year")
+                    col_map["booking_month"] = oc2.selectbox("Booking month", cols, index=cols.index(pref_booking_month) if pref_booking_month in cols else 0, key="cost_map_book_month")
+                    col_map["financial_document"] = oc3.selectbox("Financial document", cols, index=cols.index(pref_fin_document) if pref_fin_document in cols else 0, key="cost_map_fin_doc")
+                    col_map["financial_document_posting_date"] = oc4.selectbox("Financial document posting date", cols, index=cols.index(pref_fin_posting_date) if pref_fin_posting_date in cols else 0, key="cost_map_fin_posting_date")
+                    col_map["category"] = oc5.selectbox("Category", cols, index=cols.index(pref_category) if pref_category in cols else 0, key="cost_map_category")
+
+                    cc1, cc2 = st.columns(2)
+                    default_category_if_missing = cc1.selectbox("Default category if missing", CATEGORIES, index=CATEGORIES.index(selected_settings.get("default_category_if_missing", "Other")) if selected_settings.get("default_category_if_missing", "Other") in CATEGORIES else CATEGORIES.index("Other"), key="cost_default_cat")
+                    amount_mode = cc2.selectbox("Amount sign handling", ["Keep as in file", "Convert to positive (absolute)", "Invert sign"], index=["Keep as in file", "Convert to positive (absolute)", "Invert sign"].index(selected_settings.get("amount_mode", "Keep as in file")) if selected_settings.get("amount_mode", "Keep as in file") in ["Keep as in file", "Convert to positive (absolute)", "Invert sign"] else 0, key="cost_amt_mode")
 
                     pc1, pc2, pc3 = st.columns([2, 1, 1])
                     profile_name_input = pc1.text_input("Cost profile name", value=selected_profile if selected_profile != "(none)" else "", key="cost_profile_name")
@@ -1358,34 +2273,133 @@ elif page == "📥 Actuals":
 
                     preview_rows = []
                     for _, row in df_up.iterrows():
-                        cat = normalize_category(row[col_map["category"]]) if col_map["category"] != "(none)" else default_category_if_missing
+                        rg_val = str(row[col_map["resource_group"]]).strip() if col_map["resource_group"] != "(none)" else ""
+                        project_no_val = str(row[col_map["project_no"]]).strip() if col_map["project_no"] != "(none)" else ""
+                        wbs_number_val = str(row[col_map["wbs_number"]]).strip() if col_map["wbs_number"] != "(none)" else ""
+                        task_name_val = str(row[col_map["task_name"]]).strip() if col_map["task_name"] != "(none)" else ""
+                        booking_year_val = str(row[col_map["booking_year"]]).strip() if col_map["booking_year"] != "(none)" else ""
+                        booking_month_val = str(row[col_map["booking_month"]]).strip() if col_map["booking_month"] != "(none)" else ""
+                        financial_document_val = str(row[col_map["financial_document"]]).strip() if col_map["financial_document"] != "(none)" else ""
+                        financial_document_posting_date_val = str(row[col_map["financial_document_posting_date"]]).strip() if col_map["financial_document_posting_date"] != "(none)" else ""
+                        category_val = str(row[col_map["category"]]).strip() if col_map["category"] != "(none)" else ""
+                        rg_val = "" if rg_val.lower() == "nan" else rg_val
+                        project_no_val = "" if project_no_val.lower() == "nan" else project_no_val
+                        wbs_number_val = "" if wbs_number_val.lower() == "nan" else wbs_number_val
+                        task_name_val = "" if task_name_val.lower() == "nan" else task_name_val
+                        booking_year_val = "" if booking_year_val.lower() == "nan" else booking_year_val
+                        booking_month_val = "" if booking_month_val.lower() == "nan" else booking_month_val
+                        financial_document_val = "" if financial_document_val.lower() == "nan" else financial_document_val
+                        financial_document_posting_date_val = "" if financial_document_posting_date_val.lower() == "nan" else financial_document_posting_date_val
+                        category_val = "" if category_val.lower() == "nan" else category_val
+                        category_val = category_val or default_category_if_missing
+
                         amt = parse_amount(row[col_map["amount"]]) if col_map["amount"] != "(none)" else None
                         if amt is not None:
                             if amount_mode == "Convert to positive (absolute)":
                                 amt = abs(amt)
                             elif amount_mode == "Invert sign":
                                 amt = -amt
-                        dt = parse_date(row[col_map["date"]]) if col_map["date"] != "(none)" else str(datetime.date.today())
-                        desc = str(row[col_map["description"]]).strip() if col_map["description"] != "(none)" else ""
-                        if desc.lower() == "nan":
-                            desc = ""
-                        preview_rows.append({"Date": dt, "Category": cat, "Description": desc, "Amount (€)": amt})
 
-                    edited_preview = st.data_editor(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True, num_rows="dynamic", key="cost_import_preview")
+                        dt = str(datetime.date.today())
+                        try:
+                            by = int(float(booking_year_val)) if booking_year_val else None
+                            bm = int(float(booking_month_val)) if booking_month_val else None
+                            if by and bm and 1 <= bm <= 12:
+                                dt = f"{by:04d}-{bm:02d}-01"
+                        except Exception:
+                            dt = str(datetime.date.today())
+
+                        desc_parts = []
+                        if task_name_val:
+                            desc_parts.append(task_name_val)
+                        if financial_document_val:
+                            desc_parts.append(f"FinDoc: {financial_document_val}")
+                        if financial_document_posting_date_val:
+                            desc_parts.append(f"PostingDate: {financial_document_posting_date_val}")
+                        desc = " | ".join(desc_parts)
+
+                        preview_rows.append({
+                            "Date": dt,
+                            "Task name": task_name_val,
+                            "Resource group": rg_val,
+                            "Project no.": project_no_val,
+                            "WBS Number": wbs_number_val,
+                            "Cost (EUR)": amt,
+                            "Booking year": booking_year_val,
+                            "Booking month": booking_month_val,
+                            "Financial document": financial_document_val,
+                            "Financial document posting date": financial_document_posting_date_val,
+                            "Category": category_val,
+                            "Description": desc,
+                        })
+
+                    edited_preview = st.data_editor(
+                        pd.DataFrame(preview_rows),
+                        use_container_width=True,
+                        hide_index=True,
+                        num_rows="dynamic",
+                        key="cost_import_preview",
+                        column_config={
+                            "Date": st.column_config.TextColumn("Date (YYYY-MM-DD)"),
+                            "Task name": st.column_config.TextColumn("Task name"),
+                            "Resource group": st.column_config.TextColumn("Resource group"),
+                            "Project no.": st.column_config.TextColumn("Project no."),
+                            "WBS Number": st.column_config.TextColumn("WBS Number"),
+                            "Cost (EUR)": st.column_config.NumberColumn("Cost (EUR)", step=1.0),
+                            "Booking year": st.column_config.TextColumn("Booking year"),
+                            "Booking month": st.column_config.TextColumn("Booking month"),
+                            "Financial document": st.column_config.TextColumn("Financial document"),
+                            "Financial document posting date": st.column_config.TextColumn("Financial document posting date"),
+                            "Category": st.column_config.TextColumn("Category"),
+                            "Description": st.column_config.TextColumn("Description"),
+                        },
+                    )
                     import_only_positive = st.checkbox("Import only positive amounts", value=True, key="cost_positive_only")
 
                     if st.button("Import Cost Preview Rows", key="import_cost_preview"):
                         imported, skipped = 0, 0
-                        edited_preview["Amount (€)"] = pd.to_numeric(edited_preview["Amount (€)"], errors="coerce")
+                        db.delete_actuals_by_source(project_id, "MCR Import (Cost)")
+                        edited_preview["Cost (EUR)"] = pd.to_numeric(edited_preview["Cost (EUR)"], errors="coerce")
                         for _, prow in edited_preview.iterrows():
-                            amt = prow["Amount (€)"]
+                            amt = prow["Cost (EUR)"]
                             if pd.isna(amt) or (import_only_positive and float(amt) <= 0):
                                 skipped += 1
                                 continue
-                            cat = normalize_category(prow["Category"]) if not pd.isna(prow["Category"]) else "Other"
+                            cat = str(prow.get("Category", "") or "").strip()
+                            if not cat or cat.lower() == "nan":
+                                cat = default_category_if_missing
                             dt = parse_date(prow["Date"])
+                            task_name_val = "" if pd.isna(prow.get("Task name", "")) else str(prow.get("Task name", "")).strip()
+                            rg_val = "" if pd.isna(prow.get("Resource group", "")) else str(prow.get("Resource group", "")).strip()
+                            project_no_val = "" if pd.isna(prow.get("Project no.", "")) else str(prow.get("Project no.", "")).strip()
+                            wbs_number_val = "" if pd.isna(prow.get("WBS Number", "")) else str(prow.get("WBS Number", "")).strip()
+                            financial_document_val = "" if pd.isna(prow.get("Financial document", "")) else str(prow.get("Financial document", "")).strip()
+                            financial_document_posting_date_val = "" if pd.isna(prow.get("Financial document posting date", "")) else str(prow.get("Financial document posting date", "")).strip()
                             desc = "" if pd.isna(prow.get("Description", "")) else str(prow.get("Description", "")).strip()
-                            db.add_actual(project_id, cat, desc, float(amt), dt, "MCR Import (Cost)")
+                            if not desc:
+                                desc_parts = []
+                                if task_name_val:
+                                    desc_parts.append(task_name_val)
+                                if financial_document_val:
+                                    desc_parts.append(f"FinDoc: {financial_document_val}")
+                                if financial_document_posting_date_val:
+                                    desc_parts.append(f"PostingDate: {financial_document_posting_date_val}")
+                                desc = " | ".join(desc_parts)
+                            db.add_actual(
+                                project_id,
+                                cat,
+                                desc,
+                                float(amt),
+                                dt,
+                                "MCR Import (Cost)",
+                                task_name=task_name_val or None,
+                                resource_group=rg_val or None,
+                                project_no=project_no_val or None,
+                                import_file=uploaded_cost.name if uploaded_cost else None,
+                                wbs_number=wbs_number_val or None,
+                                financial_document=financial_document_val or None,
+                                financial_document_posting_date=financial_document_posting_date_val or None,
+                            )
                             imported += 1
                         st.success(f"Imported {imported} cost rows.")
                         if skipped:
@@ -1412,7 +2426,7 @@ elif page == "📥 Actuals":
                     st.write("Preview (first 5 rows):", df_up.head())
 
                     col_map = {}
-                    st.markdown("**Map your labour file columns to app input fields:**")
+                    st.markdown("**4.2.2.1 Map your labour file columns to app input fields:**")
                     cols = ["(none)"] + list(df_up.columns)
                     default_amount = guess_column(df_up.columns, ["cost (eur)", "cost", "amount", "value", "actual amount", "booked amount"])
                     default_booking_year = guess_column(df_up.columns, ["booking year", "year", "fiscal year"])
@@ -1562,7 +2576,7 @@ elif page == "📥 Actuals":
                         })
 
                     preview_df = pd.DataFrame(preview_rows)
-                    st.markdown("**Import Preview (editable before save):**")
+                    st.markdown("**4.2.2.2 Import Preview (editable before save):**")
                     edited_preview = st.data_editor(
                         preview_df,
                         use_container_width=True,
@@ -1637,13 +2651,13 @@ elif page == "📥 Actuals":
                     st.error(f"Labour import error: {e}")
 
             st.markdown("---")
-            with st.expander("Raw actual entries"):
+            with st.expander("4.2.3 Raw actual entries"):
                 raw_actuals = db.get_actuals(project_id)
                 if not raw_actuals:
                     st.info("No actual entries yet.")
                 else:
                     df_raw = pd.DataFrame(raw_actuals)
-                    raw_cols = [c for c in ["date", "category", "task_name", "employee_name", "resource_group", "project_no", "description", "amount", "source", "import_file"] if c in df_raw.columns]
+                    raw_cols = [c for c in ["date", "category", "task_name", "employee_name", "resource_group", "project_no", "wbs_number", "financial_document", "financial_document_posting_date", "description", "amount", "source", "import_file"] if c in df_raw.columns]
                     df_display = df_raw[raw_cols].rename(columns={
                         "date": "Date",
                         "category": "Category",
@@ -1651,6 +2665,9 @@ elif page == "📥 Actuals":
                         "employee_name": "Employee",
                         "resource_group": "Resource Group",
                         "project_no": "Project no.",
+                        "wbs_number": "WBS Number",
+                        "financial_document": "Financial document",
+                        "financial_document_posting_date": "Financial document posting date",
                         "description": "Description",
                         "amount": "Amount (€)",
                         "source": "Source",
@@ -1673,7 +2690,7 @@ elif page == "📥 Actuals":
     if actuals:
         st.markdown("---")
     with tab3:
-        st.subheader("🗺️ Employee to Task Mapping")
+        st.subheader("🗺️ 4.3.1 Employee to Task Mapping")
         st.caption("Map employees (and optionally project no. / resource group) to task names. Applied automatically during labour import.")
         if st.session_state.get("labour_mapping_save_msg"):
             st.success(st.session_state.pop("labour_mapping_save_msg"))
@@ -1778,7 +2795,7 @@ elif page == "📥 Actuals":
         if st.session_state.get("labour_mapping_save_msg"):
             st.success(st.session_state.pop("labour_mapping_save_msg"))
 
-        st.markdown("**Import mapping table (first pass):**")
+        st.markdown("**4.3.2 Import mapping table (first pass):**")
         mapping_upload = st.file_uploader("Upload labour mapping file", type=["xlsx", "xls", "csv"], key="labour_mapping_upload", help="Expected fields: Project no., Employee, Resource group, Task name.")
         if mapping_upload:
             try:
@@ -1825,7 +2842,7 @@ elif page == "📥 Actuals":
             except Exception as map_ex:
                 st.error(f"Error reading mapping file: {map_ex}")
 
-        st.markdown("**Manual labour mapping**")
+        st.markdown("**4.3.3 Manual labour mapping**")
         with st.form("labour_mapping_form"):
             lm1, lm2, lm3 = st.columns(3)
             map_project_no = lm1.text_input("Project no. (optional)")
@@ -1857,7 +2874,7 @@ elif page == "📥 Actuals":
                         st.error(f"Failed to save mapping: {_e}")
 
         st.markdown("---")
-        st.subheader("⚠️ Unmapped Labour Actuals")
+        st.subheader("⚠️ 4.3.4 Unmapped Labour Actuals")
         st.caption("These labour actual entries are missing a task assignment. Use mapping above to assign them to tasks.")
         
         # Get all labour actuals and filter for unmapped ones
@@ -1905,6 +2922,78 @@ elif page == "📥 Actuals":
                             "Source": st.column_config.TextColumn("Source"),
                         }
                     )
+
+                    st.markdown("**4.3.4.1 Create mapping rule from unmapped actual**")
+                    _df_unmapped_sel = df_unmapped.copy()
+                    for _c in ["employee_name", "resource_group", "project_no", "description"]:
+                        if _c in _df_unmapped_sel.columns:
+                            _df_unmapped_sel[_c] = _df_unmapped_sel[_c].fillna("").astype(str)
+                            _df_unmapped_sel.loc[_df_unmapped_sel[_c].str.lower() == "nan", _c] = ""
+                    _df_unmapped_sel["amount"] = pd.to_numeric(_df_unmapped_sel.get("amount", 0), errors="coerce").fillna(0.0)
+                    _df_unmapped_sel = _df_unmapped_sel.sort_values("date", ascending=False).reset_index(drop=True)
+
+                    _row_options = []
+                    for _idx, _r in _df_unmapped_sel.iterrows():
+                        _row_options.append(
+                            (
+                                f"[{_idx+1}] {_r.get('date','')} | {_r.get('employee_name','(no employee)')} | "
+                                f"{_r.get('project_no','-')} | {_r.get('resource_group','-')} | € {float(_r.get('amount', 0.0)):,.2f}",
+                                _idx,
+                            )
+                        )
+
+                    _sel_lbl = st.selectbox(
+                        "Select unmapped actual row",
+                        [x[0] for x in _row_options],
+                        key="unmapped_map_row_select",
+                    )
+                    _sel_idx = next((x[1] for x in _row_options if x[0] == _sel_lbl), 0)
+                    _sel_row = _df_unmapped_sel.iloc[_sel_idx]
+
+                    _src_employee = str(_sel_row.get("employee_name", "") or "").strip()
+                    _src_rg = str(_sel_row.get("resource_group", "") or "").strip()
+                    _src_project_no = str(_sel_row.get("project_no", "") or "").strip()
+                    _src_desc = str(_sel_row.get("description", "") or "").strip()
+
+                    st.caption("Selected row preview (auto-updated):")
+                    _mf1, _mf2, _mf3 = st.columns(3)
+                    _mf1.markdown(f"**Employee:** {_src_employee or '-'}")
+                    _mf2.markdown(f"**Project no.:** {_src_project_no or '-'}")
+                    _mf3.markdown(f"**Resource group:** {_src_rg or '-'}")
+                    if _src_desc:
+                        st.caption(f"Source description: {_src_desc}")
+
+                    _task1, _task2, _task3 = st.columns([2, 2, 1])
+                    _new_task_name = _task1.text_input("Task Name *", key="unmapped_new_task_name")
+                    _new_task_desc = _task2.text_input("Task Description", key="unmapped_new_task_desc")
+                    _new_task_active = _task3.checkbox("Active", value=True, key="unmapped_new_task_active")
+
+                    if st.button("➕ Create Mapping Rule", key="create_unmapped_mapping_btn"):
+                        if not _src_employee:
+                            st.error("Selected row has no Employee. Cannot create mapping rule.")
+                        elif not _new_task_name.strip():
+                            st.error("Task Name is required to create the mapping rule.")
+                        else:
+                            try:
+                                _res = db.upsert_labour_task_mapping(
+                                    _src_project_no,
+                                    _src_employee,
+                                    _src_rg,
+                                    _new_task_name.strip(),
+                                    _new_task_desc.strip(),
+                                    is_active=_new_task_active,
+                                )
+                                _bf = db.apply_labour_mapping_to_actuals(
+                                    _src_project_no,
+                                    _src_employee,
+                                    _src_rg,
+                                    _new_task_name.strip(),
+                                )
+                                _verb = "Created" if _res == "inserted" else "Updated"
+                                st.success(f"✅ {_verb} mapping rule and updated {_bf} existing labour actual row(s).")
+                                st.rerun()
+                            except Exception as _map_ex:
+                                st.error(f"Failed to create mapping rule: {_map_ex}")
                 else:
                     st.success("✓ All labour actuals are mapped to tasks!")
             else:
@@ -1913,228 +3002,738 @@ elif page == "📥 Actuals":
             st.info("No actuals in this project.")
 
     with tab4:
-        st.subheader("Labour Actuals")
+        st.subheader("4.4.1 Actuals summary")
         df_a = pd.DataFrame(actuals)
-        df_a["amount"] = pd.to_numeric(df_a["amount"], errors="coerce").fillna(0.0)
-        st.markdown(f"**Total Actuals: € {df_a['amount'].sum():,.2f}**")
+        if df_a.empty:
+            st.info("No actuals in this project.")
+        else:
+            df_a["amount"] = pd.to_numeric(df_a["amount"], errors="coerce").fillna(0.0)
+            st.markdown(f"**Total Actuals: € {df_a['amount'].sum():,.2f}**")
 
-        # Labour monthly task summary with one-level drill-down to employee.
-        if "task_name" in df_a.columns:
-            df_lab = df_a[df_a["category"].fillna("").str.lower() == "labour"].copy()
-            if not df_lab.empty:
-                df_lab["Task"] = df_lab["task_name"].fillna("").replace("", "[Unmapped Task]")
-                df_lab["Month"] = pd.to_datetime(df_lab["date"], errors="coerce").dt.strftime("%Y-%m")
-                df_lab["Month"] = df_lab["Month"].fillna("Unknown")
+            _df_summary = df_a.copy()
+            _df_summary["Cost Type"] = _df_summary["category"].fillna("").astype(str).str.strip().str.lower().apply(
+                lambda x: "Labor actuals" if x == "labour" else "Other actuals"
+            )
 
-                task_month = (
-                    df_lab.groupby(["Task", "Month"], as_index=False)["amount"]
-                    .sum()
-                    .rename(columns={"amount": "Amount (€)"})
-                )
-                task_pivot = task_month.pivot_table(
-                    index="Task",
-                    columns="Month",
+            _sum_by_type = _df_summary.groupby("Cost Type", as_index=False)["amount"].sum().rename(columns={"amount": "Amount (€)"})
+            _pie = px.pie(
+                _sum_by_type,
+                names="Cost Type",
+                values="Amount (€)",
+                title="Total Actuals Split",
+                color="Cost Type",
+                color_discrete_map={"Labor actuals": "#4C78A8", "Other actuals": "#F58518"},
+            )
+            _pie.update_traces(textposition="inside", texttemplate="%{label}<br>€ %{value:,.0f} (%{percent})")
+            _pie.update_layout(height=300, margin=dict(l=10, r=10, t=45, b=10), legend_title_text="")
+
+            _df_summary["Month"] = pd.to_datetime(_df_summary.get("date"), errors="coerce").dt.strftime("%Y-%m")
+            _df_summary = _df_summary[_df_summary["Month"].notna()].copy()
+            _month_stack = pd.DataFrame()
+            _scol1, _scol2 = st.columns(2)
+            with _scol1:
+                st.plotly_chart(_pie, use_container_width=True)
+            with _scol2:
+                if _df_summary.empty:
+                    st.info("No dated actuals available for monthly chart.")
+                else:
+                    _df_summary["MonthDate"] = pd.to_datetime(_df_summary["Month"] + "-01", errors="coerce")
+                    _month_stack = (
+                        _df_summary.groupby(["MonthDate", "Cost Type"], as_index=False)["amount"]
+                        .sum()
+                        .rename(columns={"amount": "Amount (€)"})
+                    )
+                    _month_stack = _month_stack[_month_stack["MonthDate"].notna()].copy()
+                    _month_stack = _month_stack.sort_values("MonthDate")
+                    _month_stack["Month"] = _month_stack["MonthDate"].dt.strftime("%b-%y")
+                    _stack = px.bar(
+                        _month_stack,
+                        x="Month",
+                        y="Amount (€)",
+                        color="Cost Type",
+                        barmode="stack",
+                        title="Actuals by Month (Labor vs Other)",
+                        color_discrete_map={"Labor actuals": "#4C78A8", "Other actuals": "#F58518"},
+                    )
+                    _stack.update_layout(
+                        xaxis_title="Month",
+                        yaxis_title="Amount (€)",
+                        height=300,
+                        margin=dict(l=10, r=10, t=45, b=10),
+                        legend_title_text="",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1.0),
+                    )
+                    st.plotly_chart(_stack, use_container_width=True)
+
+            if not _month_stack.empty:
+                _cum = _month_stack.pivot_table(
+                    index="MonthDate",
+                    columns="Cost Type",
                     values="Amount (€)",
                     aggfunc="sum",
-                    fill_value=0,
+                    fill_value=0.0,
+                ).sort_index()
+                for _ct in ["Labor actuals", "Other actuals"]:
+                    if _ct not in _cum.columns:
+                        _cum[_ct] = 0.0
+                _cum = _cum[["Labor actuals", "Other actuals"]].cumsum().reset_index()
+                _cum["Month"] = _cum["MonthDate"].dt.strftime("%b-%y")
+                _cum_long = _cum.melt(
+                    id_vars=["MonthDate", "Month"],
+                    value_vars=["Labor actuals", "Other actuals"],
+                    var_name="Cost Type",
+                    value_name="Cumulative (€)",
                 )
-                if not task_pivot.empty:
-                    sorted_cols = sorted(task_pivot.columns)
-                    task_pivot = task_pivot[sorted_cols]
-                    task_pivot["Total (€)"] = task_pivot.sum(axis=1)
-                    st.markdown("**Labour Actuals by Task and Month (€):**")
-                    task_table = task_pivot.reset_index().rename(columns={"Task": "Task"})
-                    if "actuals_task_drill_open" not in st.session_state:
-                        st.session_state["actuals_task_drill_open"] = {}
-                    open_state = st.session_state["actuals_task_drill_open"]
+                _cum_chart = px.bar(
+                    _cum_long,
+                    x="Month",
+                    y="Cumulative (€)",
+                    color="Cost Type",
+                    title="Cumulative Actuals by Month (Labor vs Other)",
+                    color_discrete_map={"Labor actuals": "#4C78A8", "Other actuals": "#F58518"},
+                )
+                _cum_chart.update_layout(
+                    xaxis_title="Month",
+                    yaxis_title="Cumulative Amount (€)",
+                    barmode="stack",
+                    height=280,
+                    margin=dict(l=10, r=10, t=45, b=10),
+                    legend_title_text="",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1.0),
+                )
+                st.plotly_chart(_cum_chart, use_container_width=True)
 
-                    task_table = task_table.sort_values("Total (€)", ascending=False).reset_index(drop=True)
+            st.markdown("---")
 
-                    # Build per-task lookup maps for Project no. and Resource group
-                    _proj_col = "project_no" if "project_no" in df_lab.columns else None
-                    _rg_col = "resource_group" if "resource_group" in df_lab.columns else None
+            st.markdown("**4.4.2 Other Actuals by Task and Month (€):**")
+            _df_other = df_a[df_a["category"].fillna("").str.lower() != "labour"].copy()
+            if _df_other.empty:
+                st.info("No non-labour actuals available.")
+            elif "task_name" not in _df_other.columns:
+                st.info("Task metadata is not available for Other actuals.")
+            else:
+                _df_other["Category"] = _df_other.get("category", "").fillna("").astype(str).str.strip()
+                _df_other.loc[_df_other["Category"].eq(""), "Category"] = "(blank)"
+                _all_categories = sorted(_df_other["Category"].astype(str).unique().tolist())
+                _sel_categories = st.multiselect(
+                    "Filter Other Category",
+                    _all_categories,
+                    default=_all_categories,
+                    key="actuals_other_task_category_filter",
+                )
+                if _sel_categories:
+                    _df_other = _df_other[_df_other["Category"].astype(str).isin(_sel_categories)].copy()
+                else:
+                    _df_other = _df_other.iloc[0:0].copy()
 
-                    task_project_map = {}   # task_name -> set of project_no values
-                    task_rg_map = {}        # task_name -> set of resource_group values
-                    for _t, _grp in df_lab.groupby("Task"):
-                        if _proj_col:
-                            task_project_map[_t] = set(_grp[_proj_col].dropna().astype(str).unique())
-                        if _rg_col:
-                            task_rg_map[_t] = set(_grp[_rg_col].dropna().astype(str).unique())
+                if not _df_other.empty:
+                    _df_other["Task"] = _df_other["task_name"].fillna("").replace("", "[Unmapped Task]")
+                    _df_other["Month"] = pd.to_datetime(_df_other["date"], errors="coerce").dt.strftime("%Y-%m")
+                    _df_other["Month"] = _df_other["Month"].fillna("Unknown")
 
-                    filter_tasks = sorted(task_table["Task"].astype(str).unique().tolist())
-                    selected_tasks = st.multiselect(
-                        "Filter Task",
-                        filter_tasks,
-                        default=filter_tasks,
-                        key="actuals_task_month_filter_table",
+                    _other_task_month = (
+                        _df_other.groupby(["Task", "Month"], as_index=False)["amount"]
+                        .sum()
+                        .rename(columns={"amount": "Amount (€)"})
                     )
+                    _other_task_pivot = _other_task_month.pivot_table(
+                        index="Task",
+                        columns="Month",
+                        values="Amount (€)",
+                        aggfunc="sum",
+                        fill_value=0,
+                    )
+                    if not _other_task_pivot.empty:
+                        _other_sorted_cols = sorted(_other_task_pivot.columns)
+                        _other_task_pivot = _other_task_pivot[_other_sorted_cols]
+                        _other_task_pivot["Total (€)"] = _other_task_pivot.sum(axis=1)
+                        _other_task_table = _other_task_pivot.reset_index().rename(columns={"Task": "Task"})
+                        if "actuals_other_task_drill_open" not in st.session_state:
+                            st.session_state["actuals_other_task_drill_open"] = {}
+                        _other_open_state = st.session_state["actuals_other_task_drill_open"]
 
-                    # Project no. filter
-                    all_projects = sorted({p for ps in task_project_map.values() for p in ps}) if task_project_map else []
-                    _fcols = st.columns(2)
-                    if all_projects:
-                        sel_projects = _fcols[0].multiselect(
+                        _other_task_table = _other_task_table.sort_values("Total (€)", ascending=False).reset_index(drop=True)
+
+                        _other_proj_col = "project_no" if "project_no" in _df_other.columns else None
+                        _other_rg_col = "resource_group" if "resource_group" in _df_other.columns else None
+
+                        _other_task_project_map = {}
+                        _other_task_rg_map = {}
+                        for _t, _grp in _df_other.groupby("Task"):
+                            if _other_proj_col:
+                                _other_task_project_map[_t] = set(_grp[_other_proj_col].dropna().astype(str).unique())
+                            if _other_rg_col:
+                                _other_task_rg_map[_t] = set(_grp[_other_rg_col].dropna().astype(str).unique())
+
+                        _other_filter_tasks = sorted(_other_task_table["Task"].astype(str).unique().tolist())
+                        _other_selected_tasks = st.multiselect(
+                            "Filter Other Task",
+                            _other_filter_tasks,
+                            default=_other_filter_tasks,
+                            key="actuals_other_task_month_filter_table",
+                        )
+
+                        _other_all_projects = sorted({p for ps in _other_task_project_map.values() for p in ps}) if _other_task_project_map else []
+                        _other_fcols = st.columns(2)
+                        if _other_all_projects:
+                            _other_sel_projects = _other_fcols[0].multiselect(
+                                "Filter Other Project no.",
+                                _other_all_projects,
+                                default=_other_all_projects,
+                                key="actuals_other_task_proj_filter",
+                            )
+                        else:
+                            _other_sel_projects = []
+
+                        _other_all_rgs = sorted({r for rs in _other_task_rg_map.values() for r in rs}) if _other_task_rg_map else []
+                        if _other_all_rgs:
+                            _other_sel_rgs = _other_fcols[1].multiselect(
+                                "Filter Other Resource group",
+                                _other_all_rgs,
+                                default=_other_all_rgs,
+                                key="actuals_other_task_rg_filter",
+                            )
+                        else:
+                            _other_sel_rgs = []
+
+                        def _other_task_matches(t):
+                            if t not in _other_selected_tasks:
+                                return False
+                            if _other_sel_projects and not _other_task_project_map.get(t, set()).intersection(_other_sel_projects):
+                                return False
+                            if _other_sel_rgs and not _other_task_rg_map.get(t, set()).intersection(_other_sel_rgs):
+                                return False
+                            return True
+
+                        _other_filtered_tasks = _other_task_table[_other_task_table["Task"].map(_other_task_matches)].copy()
+                        _other_all_month_cols = [c for c in _other_task_table.columns if c not in ["Task", "Total (€)"]]
+                        _other_ym_cols = [c for c in _other_all_month_cols if re.match(r"^\d{4}-\d{2}$", str(c))]
+                        _other_other_time_cols = [c for c in _other_all_month_cols if c not in _other_ym_cols]
+                        _other_years = sorted({str(c)[:4] for c in _other_ym_cols})
+
+                        _other_tf1, _other_tf2 = st.columns(2)
+                        _other_sel_years = _other_tf1.multiselect(
+                            "Filter Other Year",
+                            _other_years,
+                            default=_other_years,
+                            key="actuals_other_task_year_filter",
+                        )
+                        _other_month_options = [m for m in _other_ym_cols if str(m)[:4] in _other_sel_years] + _other_other_time_cols
+                        _other_sel_months = _other_tf2.multiselect(
+                            "Filter Other Month",
+                            _other_month_options,
+                            default=_other_month_options,
+                            key="actuals_other_task_month_column_filter",
+                        )
+                        _other_month_cols = _other_sel_months.copy()
+
+                        _other_combined_rows = []
+                        for _, _trow in _other_filtered_tasks.iterrows():
+                            _task_name = _trow["Task"]
+                            _task_open = bool(_other_open_state.get(_task_name, False))
+                            _arrow = "\u25bc " if _task_open else "\u25ba "
+                            _task_projs = _other_task_project_map.get(_task_name, set())
+                            _task_rgs = _other_task_rg_map.get(_task_name, set())
+                            _task_row = {
+                                "Task": f"{_arrow}{_task_name}",
+                                "Project no.": ", ".join(sorted(_task_projs)) if _task_projs else "",
+                                "Resource group": "Various" if len(_task_rgs) > 1 else (next(iter(_task_rgs)) if _task_rgs else ""),
+                                "Toggle": _task_open,
+                                "_row_type": "task",
+                                "_task": _task_name,
+                            }
+                            for _c in _other_month_cols:
+                                _task_row[_c] = float(_trow[_c])
+                            _task_row["Total (€)"] = sum(float(_trow[_c]) for _c in _other_month_cols) if _other_month_cols else 0.0
+                            _other_combined_rows.append(_task_row)
+
+                            if _task_open:
+                                _df_task = _df_other[_df_other["Task"] == _task_name].copy()
+                                _df_task["Month"] = pd.to_datetime(_df_task["date"], errors="coerce").dt.strftime("%Y-%m").fillna("Unknown")
+                                _cat_month = (
+                                    _df_task.groupby(["Category", "Month"], as_index=False)["amount"]
+                                    .sum()
+                                    .rename(columns={"amount": "Amount (€)"})
+                                )
+                                _cat_pivot = _cat_month.pivot_table(
+                                    index="Category",
+                                    columns="Month",
+                                    values="Amount (€)",
+                                    aggfunc="sum",
+                                    fill_value=0,
+                                )
+                                if not _cat_pivot.empty:
+                                    for _mc in _other_month_cols:
+                                        if _mc not in _cat_pivot.columns:
+                                            _cat_pivot[_mc] = 0.0
+                                    _cat_pivot = _cat_pivot[_other_month_cols]
+                                    _cat_pivot["Total (€)"] = _cat_pivot.sum(axis=1)
+                                    for _cat_name, _crow in _cat_pivot.iterrows():
+                                        _cat_rows = _df_task[_df_task["Category"] == _cat_name]
+                                        _cat_proj = ", ".join(sorted(_cat_rows[_other_proj_col].dropna().astype(str).unique())) if _other_proj_col else ""
+                                        _cat_rg = ", ".join(sorted(_cat_rows[_other_rg_col].dropna().astype(str).unique())) if _other_rg_col else ""
+                                        _child_row = {
+                                            "Task": f"\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u21b3 {_cat_name}",
+                                            "Project no.": _cat_proj,
+                                            "Resource group": _cat_rg,
+                                            "Toggle": False,
+                                            "_row_type": "category",
+                                            "_task": _task_name,
+                                        }
+                                        for _c in _other_month_cols:
+                                            _child_row[_c] = float(_crow[_c])
+                                        _child_row["Total (€)"] = sum(float(_crow[_c]) for _c in _other_month_cols) if _other_month_cols else 0.0
+                                        _other_combined_rows.append(_child_row)
+
+                        _other_combined_df = pd.DataFrame(_other_combined_rows) if _other_combined_rows else pd.DataFrame(columns=["Task", "Project no.", "Resource group", "Toggle"] + _other_month_cols + ["Total (€)", "_row_type", "_task"])
+
+                        _other_total_row = {"Task": "TOTAL", "Project no.": "", "Resource group": "", "Toggle": False, "_row_type": "total", "_task": ""}
+                        for _c in _other_month_cols:
+                            _other_total_row[_c] = pd.to_numeric(_other_filtered_tasks[_c], errors="coerce").fillna(0).sum() if _c in _other_filtered_tasks.columns else 0.0
+                        _other_total_row["Total (€)"] = sum(float(_other_total_row[_c]) for _c in _other_month_cols) if _other_month_cols else 0.0
+                        _other_combined_df = pd.concat([_other_combined_df, pd.DataFrame([_other_total_row])], ignore_index=True)
+
+                        _other_display_df = _other_combined_df[["Task", "Project no.", "Resource group"] + _other_month_cols + ["Total (€)"]].copy()
+                        import hashlib as _hl
+                        _other_open_sig = "_".join(f"{k}={v}" for k, v in sorted(_other_open_state.items()))
+                        _other_table_key = "aotm_" + _hl.md5(_other_open_sig.encode()).hexdigest()[:8]
+
+                        st.caption("Click a task row to expand / collapse its category breakdown.")
+                        _other_sel_result = st.dataframe(
+                            _other_display_df,
+                            hide_index=True,
+                            use_container_width=True,
+                            on_select="rerun",
+                            selection_mode="single-row",
+                            column_config={
+                                "Task": st.column_config.TextColumn("Task"),
+                                "Project no.": st.column_config.TextColumn("Project no."),
+                                "Resource group": st.column_config.TextColumn("Resource group"),
+                                **{c: st.column_config.NumberColumn(c, format="€ %,.2f") for c in _other_month_cols + ["Total (€)"]},
+                            },
+                            key=_other_table_key,
+                        )
+                        _other_sel_rows = _other_sel_result.selection.get("rows", []) if _other_sel_result and hasattr(_other_sel_result, "selection") else []
+                        if _other_sel_rows:
+                            _other_clicked_idx = _other_sel_rows[0]
+                            if _other_clicked_idx < len(_other_combined_df):
+                                _other_clicked_type = _other_combined_df.iloc[_other_clicked_idx]["_row_type"]
+                                _other_clicked_task = _other_combined_df.iloc[_other_clicked_idx]["_task"]
+                                if _other_clicked_type == "task" and _other_clicked_task:
+                                    _other_open_state[_other_clicked_task] = not _other_open_state.get(_other_clicked_task, False)
+                                    st.rerun()
+                    else:
+                        st.info("No Other task rows available after filters.")
+                else:
+                    st.info("No non-labour actuals in this project.")
+
+            st.markdown("---")
+
+            if "task_name" in df_a.columns:
+                df_lab = df_a[df_a["category"].fillna("").str.lower() == "labour"].copy()
+                if not df_lab.empty:
+                    df_lab["Employee"] = df_lab.get("employee_name", "").fillna("").replace("", "(unknown employee)")
+                    _all_employees = sorted(df_lab["Employee"].astype(str).unique().tolist())
+                    _sel_employees = st.multiselect(
+                        "Filter Employee",
+                        _all_employees,
+                        default=_all_employees,
+                        key="actuals_task_employee_filter",
+                    )
+                    if _sel_employees:
+                        df_lab = df_lab[df_lab["Employee"].astype(str).isin(_sel_employees)].copy()
+                    else:
+                        df_lab = df_lab.iloc[0:0].copy()
+
+                if not df_lab.empty:
+                    df_lab["Task"] = df_lab["task_name"].fillna("").replace("", "[Unmapped Task]")
+                    df_lab["Month"] = pd.to_datetime(df_lab["date"], errors="coerce").dt.strftime("%Y-%m")
+                    df_lab["Month"] = df_lab["Month"].fillna("Unknown")
+
+                    task_month = (
+                        df_lab.groupby(["Task", "Month"], as_index=False)["amount"]
+                        .sum()
+                        .rename(columns={"amount": "Amount (€)"})
+                    )
+                    task_pivot = task_month.pivot_table(
+                        index="Task",
+                        columns="Month",
+                        values="Amount (€)",
+                        aggfunc="sum",
+                        fill_value=0,
+                    )
+                    if not task_pivot.empty:
+                        sorted_cols = sorted(task_pivot.columns)
+                        task_pivot = task_pivot[sorted_cols]
+                        task_pivot["Total (€)"] = task_pivot.sum(axis=1)
+                        st.markdown("**4.4.3 Labour Actuals by Task and Month (€):**")
+                        task_table = task_pivot.reset_index().rename(columns={"Task": "Task"})
+                        if "actuals_task_drill_open" not in st.session_state:
+                            st.session_state["actuals_task_drill_open"] = {}
+                        open_state = st.session_state["actuals_task_drill_open"]
+
+                        task_table = task_table.sort_values("Total (€)", ascending=False).reset_index(drop=True)
+
+                        _proj_col = "project_no" if "project_no" in df_lab.columns else None
+                        _rg_col = "resource_group" if "resource_group" in df_lab.columns else None
+
+                        task_project_map = {}
+                        task_rg_map = {}
+                        for _t, _grp in df_lab.groupby("Task"):
+                            if _proj_col:
+                                task_project_map[_t] = set(_grp[_proj_col].dropna().astype(str).unique())
+                            if _rg_col:
+                                task_rg_map[_t] = set(_grp[_rg_col].dropna().astype(str).unique())
+
+                        filter_tasks = sorted(task_table["Task"].astype(str).unique().tolist())
+                        selected_tasks = st.multiselect(
+                            "Filter Task",
+                            filter_tasks,
+                            default=filter_tasks,
+                            key="actuals_task_month_filter_table",
+                        )
+
+                        all_projects = sorted({p for ps in task_project_map.values() for p in ps}) if task_project_map else []
+                        _fcols = st.columns(2)
+                        if all_projects:
+                            sel_projects = _fcols[0].multiselect(
+                                "Filter Project no.",
+                                all_projects,
+                                default=all_projects,
+                                key="actuals_task_proj_filter",
+                            )
+                        else:
+                            sel_projects = []
+
+                        all_rgs = sorted({r for rs in task_rg_map.values() for r in rs}) if task_rg_map else []
+                        if all_rgs:
+                            sel_rgs = _fcols[1].multiselect(
+                                "Filter Resource group",
+                                all_rgs,
+                                default=all_rgs,
+                                key="actuals_task_rg_filter",
+                            )
+                        else:
+                            sel_rgs = []
+
+                        def _task_matches(t):
+                            if t not in selected_tasks:
+                                return False
+                            if sel_projects and not task_project_map.get(t, set()).intersection(sel_projects):
+                                return False
+                            if sel_rgs and not task_rg_map.get(t, set()).intersection(sel_rgs):
+                                return False
+                            return True
+
+                        filtered_tasks = task_table[task_table["Task"].map(_task_matches)].copy()
+                        _all_month_cols = [c for c in task_table.columns if c not in ["Task", "Total (€)"]]
+                        _ym_cols = [c for c in _all_month_cols if re.match(r"^\d{4}-\d{2}$", str(c))]
+                        _other_time_cols = [c for c in _all_month_cols if c not in _ym_cols]
+                        _years = sorted({str(c)[:4] for c in _ym_cols})
+
+                        _tf1, _tf2 = st.columns(2)
+                        sel_years = _tf1.multiselect(
+                            "Filter Year",
+                            _years,
+                            default=_years,
+                            key="actuals_task_year_filter",
+                        )
+                        _month_options = [m for m in _ym_cols if str(m)[:4] in sel_years] + _other_time_cols
+                        sel_months = _tf2.multiselect(
+                            "Filter Month",
+                            _month_options,
+                            default=_month_options,
+                            key="actuals_task_month_column_filter",
+                        )
+                        month_cols = sel_months.copy()
+
+                        combined_rows = []
+                        for _, trow in filtered_tasks.iterrows():
+                            task_name = trow["Task"]
+                            task_open = bool(open_state.get(task_name, False))
+                            arrow = "\u25bc " if task_open else "\u25ba "
+                            _task_projs = task_project_map.get(task_name, set())
+                            _task_rgs = task_rg_map.get(task_name, set())
+                            task_row = {
+                                "Task": f"{arrow}{task_name}",
+                                "Project no.": ", ".join(sorted(_task_projs)) if _task_projs else "",
+                                "Resource group": "Various" if len(_task_rgs) > 1 else (next(iter(_task_rgs)) if _task_rgs else ""),
+                                "Toggle": task_open,
+                                "_row_type": "task",
+                                "_task": task_name,
+                            }
+                            for c in month_cols:
+                                task_row[c] = float(trow[c])
+                            task_row["Total (€)"] = sum(float(trow[c]) for c in month_cols) if month_cols else 0.0
+                            combined_rows.append(task_row)
+
+                            if task_open:
+                                df_task = df_lab[df_lab["Task"] == task_name].copy()
+                                df_task["Month"] = pd.to_datetime(df_task["date"], errors="coerce").dt.strftime("%Y-%m").fillna("Unknown")
+                                _emp_rg_col = "resource_group" if "resource_group" in df_task.columns else None
+                                _emp_proj_col = "project_no" if "project_no" in df_task.columns else None
+                                emp_month = (
+                                    df_task.groupby(["Employee", "Month"], as_index=False)["amount"]
+                                    .sum()
+                                    .rename(columns={"amount": "Amount (€)"})
+                                )
+                                emp_pivot = emp_month.pivot_table(
+                                    index="Employee",
+                                    columns="Month",
+                                    values="Amount (€)",
+                                    aggfunc="sum",
+                                    fill_value=0,
+                                )
+                                if not emp_pivot.empty:
+                                    for mc in month_cols:
+                                        if mc not in emp_pivot.columns:
+                                            emp_pivot[mc] = 0.0
+                                    emp_pivot = emp_pivot[month_cols]
+                                    emp_pivot["Total (€)"] = emp_pivot.sum(axis=1)
+                                    for emp_name, erow in emp_pivot.iterrows():
+                                        _emp_rows = df_task[df_task["Employee"] == emp_name]
+                                        _emp_proj = ", ".join(sorted(_emp_rows[_emp_proj_col].dropna().astype(str).unique())) if _emp_proj_col else ""
+                                        _emp_rg = ", ".join(sorted(_emp_rows[_emp_rg_col].dropna().astype(str).unique())) if _emp_rg_col else ""
+                                        child_row = {
+                                            "Task": f"\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u21b3 {emp_name}",
+                                            "Project no.": _emp_proj,
+                                            "Resource group": _emp_rg,
+                                            "Toggle": False,
+                                            "_row_type": "employee",
+                                            "_task": task_name,
+                                        }
+                                        for c in month_cols:
+                                            child_row[c] = float(erow[c])
+                                        child_row["Total (€)"] = sum(float(erow[c]) for c in month_cols) if month_cols else 0.0
+                                        combined_rows.append(child_row)
+
+                        combined_df = pd.DataFrame(combined_rows) if combined_rows else pd.DataFrame(columns=["Task", "Project no.", "Resource group", "Toggle"] + month_cols + ["Total (€)", "_row_type", "_task"])
+
+                        total_row = {"Task": "TOTAL", "Project no.": "", "Resource group": "", "Toggle": False, "_row_type": "total", "_task": ""}
+                        for c in month_cols:
+                            total_row[c] = pd.to_numeric(filtered_tasks[c], errors="coerce").fillna(0).sum() if c in filtered_tasks.columns else 0.0
+                        total_row["Total (€)"] = sum(float(total_row[c]) for c in month_cols) if month_cols else 0.0
+                        combined_df = pd.concat([combined_df, pd.DataFrame([total_row])], ignore_index=True)
+
+                        display_df = combined_df[["Task", "Project no.", "Resource group"] + month_cols + ["Total (€)"]].copy()
+                        import hashlib as _hl
+                        _open_sig = "_".join(f"{k}={v}" for k, v in sorted(open_state.items()))
+                        _table_key = "atme_" + _hl.md5(_open_sig.encode()).hexdigest()[:8]
+
+                        st.caption("Click a task row to expand / collapse its employee breakdown.")
+                        sel_result = st.dataframe(
+                            display_df,
+                            hide_index=True,
+                            use_container_width=True,
+                            on_select="rerun",
+                            selection_mode="single-row",
+                            column_config={
+                                "Task": st.column_config.TextColumn("Task"),
+                                "Project no.": st.column_config.TextColumn("Project no."),
+                                "Resource group": st.column_config.TextColumn("Resource group"),
+                                **{c: st.column_config.NumberColumn(c, format="€ %,.2f") for c in month_cols + ["Total (€)"]},
+                            },
+                            key=_table_key,
+                        )
+                        _sel_rows = sel_result.selection.get("rows", []) if sel_result and hasattr(sel_result, "selection") else []
+                        if _sel_rows:
+                            _clicked_idx = _sel_rows[0]
+                            if _clicked_idx < len(combined_df):
+                                _clicked_type = combined_df.iloc[_clicked_idx]["_row_type"]
+                                _clicked_task = combined_df.iloc[_clicked_idx]["_task"]
+                                if _clicked_type == "task" and _clicked_task:
+                                    open_state[_clicked_task] = not open_state.get(_clicked_task, False)
+                                    st.rerun()
+
+            st.markdown("---")
+            with st.expander("📊 4.4.5 Labour Actuals by Project No and Month (€)"):
+                _df_lab_pno = df_a[df_a["category"].fillna("").str.lower() == "labour"].copy()
+                if _df_lab_pno.empty:
+                    st.info("No labour actuals available.")
+                else:
+                    _df_lab_pno["Project no."] = _df_lab_pno.get("project_no", "").fillna("").astype(str).str.strip()
+                    _df_lab_pno.loc[_df_lab_pno["Project no."].eq(""), "Project no."] = "(blank)"
+                    _df_lab_pno["Month"] = pd.to_datetime(_df_lab_pno.get("date"), errors="coerce").dt.strftime("%Y-%m")
+                    _df_lab_pno = _df_lab_pno[_df_lab_pno["Month"].notna()].copy()
+
+                    if _df_lab_pno.empty:
+                        st.info("No dated labour actuals available for monthly grouping.")
+                    else:
+                        _all_proj_no = sorted(_df_lab_pno["Project no."].astype(str).unique().tolist())
+                        _sel_proj_no = st.multiselect(
                             "Filter Project no.",
-                            all_projects,
-                            default=all_projects,
-                            key="actuals_task_proj_filter",
+                            _all_proj_no,
+                            default=_all_proj_no,
+                            key="actuals_projno_filter_445",
                         )
-                    else:
-                        sel_projects = []
+                        if _sel_proj_no:
+                            _df_lab_pno = _df_lab_pno[_df_lab_pno["Project no."].isin(_sel_proj_no)].copy()
+                        else:
+                            _df_lab_pno = _df_lab_pno.iloc[0:0].copy()
 
-                    # Resource group filter
-                    all_rgs = sorted({r for rs in task_rg_map.values() for r in rs}) if task_rg_map else []
-                    if all_rgs:
-                        sel_rgs = _fcols[1].multiselect(
-                            "Filter Resource group",
-                            all_rgs,
-                            default=all_rgs,
-                            key="actuals_task_rg_filter",
+                        _all_months = sorted(_df_lab_pno["Month"].astype(str).unique().tolist()) if not _df_lab_pno.empty else []
+                        _years = sorted({m[:4] for m in _all_months}) if _all_months else []
+                        _y1, _y2 = st.columns(2)
+                        _sel_years = _y1.multiselect(
+                            "Filter Year",
+                            _years,
+                            default=_years,
+                            key="actuals_projno_year_filter_445",
                         )
-                    else:
-                        sel_rgs = []
+                        _month_opts = [m for m in _all_months if (not _sel_years or m[:4] in _sel_years)]
+                        _sel_months = _y2.multiselect(
+                            "Filter Month",
+                            _month_opts,
+                            default=_month_opts,
+                            key="actuals_projno_month_filter_445",
+                        )
+                        if _sel_months:
+                            _df_lab_pno = _df_lab_pno[_df_lab_pno["Month"].isin(_sel_months)].copy()
+                        else:
+                            _df_lab_pno = _df_lab_pno.iloc[0:0].copy()
 
-                    # Apply all filters to task list
-                    def _task_matches(t):
-                        if t not in selected_tasks:
-                            return False
-                        if sel_projects and not task_project_map.get(t, set()).intersection(sel_projects):
-                            return False
-                        if sel_rgs and not task_rg_map.get(t, set()).intersection(sel_rgs):
-                            return False
-                        return True
-
-                    filtered_tasks = task_table[task_table["Task"].map(_task_matches)].copy()
-                    month_cols = [c for c in task_table.columns if c not in ["Task", "Total (€)"]]
-
-                    combined_rows = []
-                    for _, trow in filtered_tasks.iterrows():
-                        task_name = trow["Task"]
-                        task_open = bool(open_state.get(task_name, False))
-
-                        arrow = "\u25bc " if task_open else "\u25ba "
-                        _task_projs = task_project_map.get(task_name, set())
-                        _task_rgs = task_rg_map.get(task_name, set())
-                        _task_proj_str = ", ".join(sorted(_task_projs)) if _task_projs else ""
-                        _task_rg_str = "Various" if len(_task_rgs) > 1 else (next(iter(_task_rgs)) if _task_rgs else "")
-                        task_row = {
-                            "Task": f"{arrow}{task_name}",
-                            "Project no.": _task_proj_str,
-                            "Resource group": _task_rg_str,
-                            "Toggle": task_open,
-                            "_row_type": "task",
-                            "_task": task_name,
-                        }
-                        for c in month_cols + ["Total (\u20ac)"]:
-                            task_row[c] = float(trow[c])
-                        combined_rows.append(task_row)
-
-                        if task_open:
-                            df_task = df_lab[df_lab["Task"] == task_name].copy()
-                            df_task["Employee"] = df_task.get("employee_name", "").fillna("").replace("", "(unknown employee)")
-                            df_task["Month"] = pd.to_datetime(df_task["date"], errors="coerce").dt.strftime("%Y-%m").fillna("Unknown")
-                            _emp_rg_col = "resource_group" if "resource_group" in df_task.columns else None
-                            _emp_proj_col = "project_no" if "project_no" in df_task.columns else None
-                            emp_month = (
-                                df_task.groupby(["Employee", "Month"], as_index=False)["amount"]
+                        if _df_lab_pno.empty:
+                            st.info("No rows after filters.")
+                        else:
+                            _grp = (
+                                _df_lab_pno.groupby(["Project no.", "Month"], as_index=False)["amount"]
                                 .sum()
-                                .rename(columns={"amount": "Amount (\u20ac)"})
+                                .rename(columns={"amount": "Amount (€)"})
                             )
-                            emp_pivot = emp_month.pivot_table(
-                                index="Employee",
+                            _pivot = _grp.pivot_table(
+                                index="Project no.",
                                 columns="Month",
-                                values="Amount (\u20ac)",
+                                values="Amount (€)",
                                 aggfunc="sum",
-                                fill_value=0,
+                                fill_value=0.0,
                             )
-                            if not emp_pivot.empty:
-                                for mc in month_cols:
-                                    if mc not in emp_pivot.columns:
-                                        emp_pivot[mc] = 0.0
-                                emp_pivot = emp_pivot[month_cols]
-                                emp_pivot["Total (\u20ac)"] = emp_pivot.sum(axis=1)
-                                for emp_name, erow in emp_pivot.iterrows():
-                                    _emp_rows = df_task[df_task["Employee"] == emp_name]
-                                    _emp_proj = ", ".join(sorted(_emp_rows[_emp_proj_col].dropna().astype(str).unique())) if _emp_proj_col else ""
-                                    _emp_rg = ", ".join(sorted(_emp_rows[_emp_rg_col].dropna().astype(str).unique())) if _emp_rg_col else ""
-                                    child_row = {
-                                        "Task": f"\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u21b3 {emp_name}",
-                                        "Project no.": _emp_proj,
-                                        "Resource group": _emp_rg,
-                                        "Toggle": False,
-                                        "_row_type": "employee",
-                                        "_task": task_name,
-                                    }
-                                    for c in month_cols + ["Total (\u20ac)"]:
-                                        child_row[c] = float(erow[c])
-                                    combined_rows.append(child_row)
+                            _month_cols = sorted(_pivot.columns.tolist()) if len(_pivot.columns) else []
+                            if _month_cols:
+                                _pivot = _pivot[_month_cols]
+                            _pivot["Total (€)"] = _pivot.sum(axis=1)
+                            _tbl = _pivot.reset_index().sort_values("Total (€)", ascending=False)
 
-                    if combined_rows:
-                        combined_df = pd.DataFrame(combined_rows)
+                            _total_row = {"Project no.": "TOTAL"}
+                            for _mc in _month_cols:
+                                _total_row[_mc] = float(pd.to_numeric(_tbl[_mc], errors="coerce").fillna(0.0).sum())
+                            _total_row["Total (€)"] = float(pd.to_numeric(_tbl["Total (€)"], errors="coerce").fillna(0.0).sum())
+                            _tbl = pd.concat([_tbl, pd.DataFrame([_total_row])], ignore_index=True)
+
+                            st.dataframe(
+                                _tbl,
+                                hide_index=True,
+                                use_container_width=True,
+                                column_config={
+                                    "Project no.": st.column_config.TextColumn("Project no."),
+                                    **{c: st.column_config.NumberColumn(c, format="€ %,.2f") for c in _month_cols + ["Total (€)"]},
+                                },
+                            )
+
+            with st.expander("📊 4.4.6 Other Actuals by Project No and Month (€)"):
+                _df_other_pno = df_a[df_a["category"].fillna("").str.lower() != "labour"].copy()
+                if _df_other_pno.empty:
+                    st.info("No other actuals available.")
+                else:
+                    _df_other_pno["Project no."] = _df_other_pno.get("project_no", "").fillna("").astype(str).str.strip()
+                    _df_other_pno.loc[_df_other_pno["Project no."].eq(""), "Project no."] = "(blank)"
+                    _df_other_pno["Month"] = pd.to_datetime(_df_other_pno.get("date"), errors="coerce").dt.strftime("%Y-%m")
+                    _df_other_pno = _df_other_pno[_df_other_pno["Month"].notna()].copy()
+
+                    if _df_other_pno.empty:
+                        st.info("No dated other actuals available for monthly grouping.")
                     else:
-                        combined_df = pd.DataFrame(columns=["Task", "Project no.", "Resource group", "Toggle"] + month_cols + ["Total (€)", "_row_type", "_task"])
+                        _all_proj_no = sorted(_df_other_pno["Project no."].astype(str).unique().tolist())
+                        _sel_proj_no = st.multiselect(
+                            "Filter Other Project no.",
+                            _all_proj_no,
+                            default=_all_proj_no,
+                            key="actuals_projno_filter_446",
+                        )
+                        if _sel_proj_no:
+                            _df_other_pno = _df_other_pno[_df_other_pno["Project no."].isin(_sel_proj_no)].copy()
+                        else:
+                            _df_other_pno = _df_other_pno.iloc[0:0].copy()
 
-                    total_row = {
-                        "Task": "TOTAL",
-                        "Project no.": "",
-                        "Resource group": "",
-                        "Toggle": False,
-                        "_row_type": "total",
-                        "_task": "",
-                    }
-                    for c in month_cols + ["Total (€)"]:
-                        total_row[c] = pd.to_numeric(filtered_tasks[c], errors="coerce").fillna(0).sum() if c in filtered_tasks.columns else 0.0
+                        _all_months = sorted(_df_other_pno["Month"].astype(str).unique().tolist()) if not _df_other_pno.empty else []
+                        _years = sorted({m[:4] for m in _all_months}) if _all_months else []
+                        _y1, _y2 = st.columns(2)
+                        _sel_years = _y1.multiselect(
+                            "Filter Other Year",
+                            _years,
+                            default=_years,
+                            key="actuals_projno_year_filter_446",
+                        )
+                        _month_opts = [m for m in _all_months if (not _sel_years or m[:4] in _sel_years)]
+                        _sel_months = _y2.multiselect(
+                            "Filter Other Month",
+                            _month_opts,
+                            default=_month_opts,
+                            key="actuals_projno_month_filter_446",
+                        )
+                        if _sel_months:
+                            _df_other_pno = _df_other_pno[_df_other_pno["Month"].isin(_sel_months)].copy()
+                        else:
+                            _df_other_pno = _df_other_pno.iloc[0:0].copy()
 
-                    combined_df = pd.concat([combined_df, pd.DataFrame([total_row])], ignore_index=True)
+                        if _df_other_pno.empty:
+                            st.info("No rows after filters.")
+                        else:
+                            _grp = (
+                                _df_other_pno.groupby(["Project no.", "Month"], as_index=False)["amount"]
+                                .sum()
+                                .rename(columns={"amount": "Amount (€)"})
+                            )
+                            _pivot = _grp.pivot_table(
+                                index="Project no.",
+                                columns="Month",
+                                values="Amount (€)",
+                                aggfunc="sum",
+                                fill_value=0.0,
+                            )
+                            _month_cols = sorted(_pivot.columns.tolist()) if len(_pivot.columns) else []
+                            if _month_cols:
+                                _pivot = _pivot[_month_cols]
+                            _pivot["Total (€)"] = _pivot.sum(axis=1)
+                            _tbl = _pivot.reset_index().sort_values("Total (€)", ascending=False)
 
-                    display_df = combined_df[["Task", "Project no.", "Resource group"] + month_cols + ["Total (€)"]].copy()
+                            _total_row = {"Project no.": "TOTAL"}
+                            for _mc in _month_cols:
+                                _total_row[_mc] = float(pd.to_numeric(_tbl[_mc], errors="coerce").fillna(0.0).sum())
+                            _total_row["Total (€)"] = float(pd.to_numeric(_tbl["Total (€)"], errors="coerce").fillna(0.0).sum())
+                            _tbl = pd.concat([_tbl, pd.DataFrame([_total_row])], ignore_index=True)
 
-                    # Dynamic key resets selection whenever table structure changes
-                    import hashlib as _hl
-                    _open_sig = "_".join(f"{k}={v}" for k, v in sorted(open_state.items()))
-                    _table_key = "atme_" + _hl.md5(_open_sig.encode()).hexdigest()[:8]
+                            st.dataframe(
+                                _tbl,
+                                hide_index=True,
+                                use_container_width=True,
+                                column_config={
+                                    "Project no.": st.column_config.TextColumn("Project no."),
+                                    **{c: st.column_config.NumberColumn(c, format="€ %,.2f") for c in _month_cols + ["Total (€)"]},
+                                },
+                            )
 
-                    st.caption("Click a task row to expand / collapse its employee breakdown.")
-                    sel_result = st.dataframe(
-                        display_df,
-                        hide_index=True,
-                        use_container_width=True,
-                        on_select="rerun",
-                        selection_mode="single-row",
-                        column_config={
-                            "Task": st.column_config.TextColumn("Task"),
-                            "Project no.": st.column_config.TextColumn("Project no."),
-                            "Resource group": st.column_config.TextColumn("Resource group"),
-                            **{c: st.column_config.NumberColumn(c, format="€ %,.2f") for c in month_cols + ["Total (€)"]},
-                        },
-                        key=_table_key,
+            with st.expander("🗑️ 4.4.4 Delete an actual entry"):
+                del_options = {}
+                for r in actuals:
+                    _emp = str(r.get("employee_name") or "").strip() or "-"
+                    _rg = str(r.get("resource_group") or "").strip() or "-"
+                    _label = (
+                        f"[{r['id']}] {r['date']} - {r['category']} | "
+                        f"Emp: {_emp} | RG: {_rg} | (€{r['amount']:,.0f})"
                     )
-
-                    # Handle row-click toggle
-                    _sel_rows = sel_result.selection.get("rows", []) if sel_result and hasattr(sel_result, "selection") else []
-                    if _sel_rows:
-                        _clicked_idx = _sel_rows[0]
-                        if _clicked_idx < len(combined_df):
-                            _clicked_type = combined_df.iloc[_clicked_idx]["_row_type"]
-                            _clicked_task = combined_df.iloc[_clicked_idx]["_task"]
-                            if _clicked_type == "task" and _clicked_task:
-                                open_state[_clicked_task] = not open_state.get(_clicked_task, False)
-                                st.rerun()
-
-        with st.expander("🗑️ Delete an actual entry"):
-            del_options = {f"[{r['id']}] {r['date']} - {r['category']} (€{r['amount']:,.0f})": r["id"] for r in actuals}
-            sel = st.selectbox("Select entry to delete", list(del_options.keys()))
-            if st.button("Delete selected entry"):
-                db.delete_actual(del_options[sel])
-                st.success("Deleted.")
-                st.rerun()
+                    del_options[_label] = r["id"]
+                sel = st.selectbox("Select entry to delete", list(del_options.keys()))
+                if st.button("Delete selected entry"):
+                    db.delete_actual(del_options[sel])
+                    st.success("Deleted.")
+                    st.rerun()
 
 # ════════════════════════════════════════════════════════════════════════════
 # 5. FORECAST
 # ════════════════════════════════════════════════════════════════════════════
 elif page == "🔮 Forecast":
-    st.title("🔮 Forecast (Estimate to Complete)")
+    st.title("🔮 5. Forecast (Estimate to Complete)")
+    st.caption("Reference: 5.1 Enter ETC | 5.2 Forecast Summary")
     project_id, project = select_project()
     if not project_id:
         st.stop()
@@ -2153,7 +3752,7 @@ elif page == "🔮 Forecast":
     forecasts = {f["category"]: f for f in db.get_forecasts(project_id)}
 
     with st.form("forecast_form"):
-        st.markdown("**Enter ETC per category:**")
+        st.markdown("**5.1 Enter ETC per category:**")
         new_forecasts = {}
         for cat in CATEGORIES:
             actual_val = actuals_by_cat.get(cat, 0.0)
@@ -2173,6 +3772,7 @@ elif page == "🔮 Forecast":
             st.rerun()
 
     # Summary
+    st.markdown("**5.2 Forecast summary:**")
     summary = db.get_project_summary(project_id)
     st.markdown("---")
     c1, c2, c3, c4 = st.columns(4)
@@ -2186,7 +3786,8 @@ elif page == "🔮 Forecast":
 # 6. VARIANCE REPORT
 # ════════════════════════════════════════════════════════════════════════════
 elif page == "📊 Variance Report":
-    st.title("📊 Variance Report")
+    st.title("📊 6. Variance Report")
+    st.caption("Reference: 6.1 Variance table | 6.2 Totals and chart")
     project_id, project = select_project()
     if not project_id:
         st.stop()
@@ -2243,7 +3844,7 @@ elif page == "📊 Variance Report":
         total_act = df_v["Actuals (€)"].sum()
         total_eac = df_v["EAC (€)"].sum()
         total_var = df_v["Variance (€)"].sum()
-        st.markdown(f"**Totals: Budget € {total_plan:,.0f} | Actuals € {total_act:,.0f} | EAC € {total_eac:,.0f} | Variance € {total_var:,.0f}**")
+        st.markdown(f"**6.2 Totals: Budget € {total_plan:,.0f} | Actuals € {total_act:,.0f} | EAC € {total_eac:,.0f} | Variance € {total_var:,.0f}**")
 
         # Waterfall-style chart
         fig = go.Figure()
@@ -2259,12 +3860,13 @@ elif page == "📊 Variance Report":
 # 7. EXPORT
 # ════════════════════════════════════════════════════════════════════════════
 elif page == "📤 Export":
-    st.title("📤 Export to Excel")
+    st.title("📤 7. Export to Excel")
+    st.caption("Reference: 7.1 Export scope | 7.2 Generate and download")
     project_id, project = select_project()
     if not project_id:
         st.stop()
 
-    st.markdown(f"Export all data for **{project['name']}** as an Excel workbook with multiple sheets.")
+    st.markdown(f"7.1 Export all data for **{project['name']}** as an Excel workbook with multiple sheets.")
 
     if st.button("Generate Excel Report"):
         budget_items = db.get_budget_items(project_id)

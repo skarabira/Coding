@@ -49,6 +49,14 @@ def init_db():
             amount      REAL DEFAULT 0,
             date        TEXT,
             source      TEXT DEFAULT 'Manual',  -- 'Manual' or 'MCR Import'
+            task_name   TEXT,
+            employee_name TEXT,
+            resource_group TEXT,
+            project_no  TEXT,
+            import_file TEXT,
+            wbs_number  TEXT,
+            financial_document TEXT,
+            financial_document_posting_date TEXT,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
 
@@ -116,12 +124,24 @@ def init_db():
             FOREIGN KEY (task_id) REFERENCES plan_tasks(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS plan_text_values (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id     INTEGER NOT NULL,
+            col_key     TEXT NOT NULL,
+            text_value  TEXT DEFAULT '',
+            updated_at  TEXT DEFAULT (datetime('now')),
+            updated_by  TEXT DEFAULT '',
+            UNIQUE(task_id, col_key),
+            FOREIGN KEY (task_id) REFERENCES plan_tasks(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS plan_columns (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             project_id  INTEGER NOT NULL,
             col_key     TEXT NOT NULL,
             col_label   TEXT NOT NULL,
             col_type    TEXT DEFAULT 'custom',
+            data_type   TEXT DEFAULT 'decimal',
             sort_order  INTEGER DEFAULT 100,
             UNIQUE(project_id, col_key),
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -180,6 +200,17 @@ def init_db():
         c.execute("ALTER TABLE actuals ADD COLUMN project_no TEXT")
     if "import_file" not in actuals_cols:
         c.execute("ALTER TABLE actuals ADD COLUMN import_file TEXT")
+    if "wbs_number" not in actuals_cols:
+        c.execute("ALTER TABLE actuals ADD COLUMN wbs_number TEXT")
+    if "financial_document" not in actuals_cols:
+        c.execute("ALTER TABLE actuals ADD COLUMN financial_document TEXT")
+    if "financial_document_posting_date" not in actuals_cols:
+        c.execute("ALTER TABLE actuals ADD COLUMN financial_document_posting_date TEXT")
+
+    # Lightweight migration for older DBs before plan_columns.data_type existed.
+    plan_col_cols = [r["name"] for r in c.execute("PRAGMA table_info(plan_columns)").fetchall()]
+    if "data_type" not in plan_col_cols:
+        c.execute("ALTER TABLE plan_columns ADD COLUMN data_type TEXT DEFAULT 'decimal'")
 
     conn.commit()
     conn.close()
@@ -305,14 +336,18 @@ def add_actual(
     resource_group=None,
     project_no=None,
     import_file=None,
+    wbs_number=None,
+    financial_document=None,
+    financial_document_posting_date=None,
 ):
     conn = get_conn()
     conn.execute(
         """
         INSERT INTO actuals (
             project_id, category, description, amount, date, source,
-            task_name, employee_name, resource_group, project_no, import_file
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            task_name, employee_name, resource_group, project_no, import_file,
+            wbs_number, financial_document, financial_document_posting_date
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             project_id,
@@ -326,6 +361,9 @@ def add_actual(
             resource_group,
             project_no,
             import_file,
+            wbs_number,
+            financial_document,
+            financial_document_posting_date,
         ),
     )
     conn.commit()
@@ -687,10 +725,30 @@ def upsert_forecast(project_id, category, etc, note):
 def get_project_summary(project_id):
     """Returns total planned, actual, forecast (EAC) for a project."""
     conn = get_conn()
-    planned = conn.execute(
-        "SELECT COALESCE(SUM(planned),0) FROM budget_items WHERE project_id=?",
+    # Prefer Budget Planning totals (sum of month columns in plan_values) when plan tasks exist.
+    # Fallback to legacy budget_items if no plan tasks are defined for the project.
+    has_plan_tasks = conn.execute(
+        "SELECT 1 FROM plan_tasks WHERE project_id=? AND is_active=1 LIMIT 1",
         (project_id,),
-    ).fetchone()[0]
+    ).fetchone()
+
+    if has_plan_tasks:
+        planned = conn.execute(
+            """
+            SELECT COALESCE(SUM(pv.value),0)
+            FROM plan_values pv
+            JOIN plan_tasks pt ON pt.id = pv.task_id
+            WHERE pt.project_id=?
+              AND pt.is_active=1
+              AND pv.col_key LIKE '____-__'
+            """,
+            (project_id,),
+        ).fetchone()[0]
+    else:
+        planned = conn.execute(
+            "SELECT COALESCE(SUM(planned),0) FROM budget_items WHERE project_id=?",
+            (project_id,),
+        ).fetchone()[0]
     actual = conn.execute(
         "SELECT COALESCE(SUM(amount),0) FROM actuals WHERE project_id=?",
         (project_id,),
@@ -748,6 +806,7 @@ def update_plan_task(task_id, task_name, cost_type, resource_group, employees):
 def delete_plan_task(task_id):
     conn = get_conn()
     conn.execute("DELETE FROM plan_values WHERE task_id=?", (task_id,))
+    conn.execute("DELETE FROM plan_text_values WHERE task_id=?", (task_id,))
     conn.execute("DELETE FROM plan_tasks WHERE id=?", (task_id,))
     conn.commit()
     conn.close()
@@ -786,6 +845,37 @@ def upsert_plan_value(task_id, col_key, value, updated_by=""):
     conn.close()
 
 
+def get_plan_text_values_for_project(project_id):
+    """Return dict: (task_id, col_key) -> text_value for all tasks in project."""
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT ptv.task_id, ptv.col_key, ptv.text_value
+        FROM plan_text_values ptv
+        JOIN plan_tasks pt ON pt.id = ptv.task_id
+        WHERE pt.project_id=?
+        """,
+        (project_id,),
+    ).fetchall()
+    conn.close()
+    return {(r["task_id"], r["col_key"]): r["text_value"] for r in rows}
+
+
+def upsert_plan_text_value(task_id, col_key, text_value, updated_by=""):
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO plan_text_values (task_id, col_key, text_value, updated_at, updated_by)
+        VALUES (?, ?, ?, datetime('now'), ?)
+        ON CONFLICT(task_id, col_key) DO UPDATE
+        SET text_value=excluded.text_value, updated_at=excluded.updated_at, updated_by=excluded.updated_by
+        """,
+        (task_id, col_key, str(text_value or ""), updated_by),
+    )
+    conn.commit()
+    conn.close()
+
+
 # ── Budget Plan Custom Columns ───────────────────────────────────────────────
 
 def get_plan_columns(project_id):
@@ -798,16 +888,26 @@ def get_plan_columns(project_id):
     return [dict(r) for r in rows]
 
 
-def add_plan_column(project_id, col_key, col_label, col_type="custom", sort_order=100):
+def add_plan_column(project_id, col_key, col_label, col_type="custom", data_type="decimal", sort_order=100):
     conn = get_conn()
     try:
         conn.execute(
-            "INSERT INTO plan_columns (project_id, col_key, col_label, col_type, sort_order) VALUES (?,?,?,?,?)",
-            (project_id, col_key, col_label, col_type, sort_order),
+            "INSERT INTO plan_columns (project_id, col_key, col_label, col_type, data_type, sort_order) VALUES (?,?,?,?,?,?)",
+            (project_id, col_key, col_label, col_type, data_type or "decimal", sort_order),
         )
         conn.commit()
     except sqlite3.IntegrityError:
         pass  # column key already exists for this project
+    conn.close()
+
+
+def update_plan_column_data_type(col_id, data_type):
+    conn = get_conn()
+    conn.execute(
+        "UPDATE plan_columns SET data_type=? WHERE id=?",
+        (data_type or "decimal", col_id),
+    )
+    conn.commit()
     conn.close()
 
 
@@ -817,6 +917,10 @@ def delete_plan_column(col_id):
     if row:
         conn.execute(
             "DELETE FROM plan_values WHERE col_key=? AND task_id IN (SELECT id FROM plan_tasks WHERE project_id=?)",
+            (row["col_key"], row["project_id"]),
+        )
+        conn.execute(
+            "DELETE FROM plan_text_values WHERE col_key=? AND task_id IN (SELECT id FROM plan_tasks WHERE project_id=?)",
             (row["col_key"], row["project_id"]),
         )
         conn.execute("DELETE FROM plan_columns WHERE id=?", (col_id,))
