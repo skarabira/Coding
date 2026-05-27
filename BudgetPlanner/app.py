@@ -1,5 +1,5 @@
 """
-app.py - Budget Planner Main Application
+app.py - Budget Management Assistant Main Application
 Run with: streamlit run app.py
 """
 
@@ -16,7 +16,7 @@ import db
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Budget Planner",
+    page_title="Budget Management Assistant",
     page_icon="💰",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -27,7 +27,7 @@ db.init_db()
 db.ensure_default_import_profiles()
 
 # ── Sidebar navigation ───────────────────────────────────────────────────────
-st.sidebar.title("💰 Budget Planner")
+st.sidebar.title("💰 Budget Management Assistant")
 st.sidebar.markdown("---")
 page = st.sidebar.radio(
     "Navigate",
@@ -208,7 +208,7 @@ def render_table_view(df, key_prefix, filter_columns=None, total_columns=None, s
 # ════════════════════════════════════════════════════════════════════════════
 if page == "🏠 Dashboard":
     st.title("🏠 1. Dashboard")
-    st.caption("Reference: 1.1 Project Summary | 1.2 Budget vs Actuals vs EAC | 1.3 Monthly Actuals")
+    st.caption("Reference: 1.1 Project Summary | 1.2 Budget vs Actuals vs EAC | 1.3 Monthly Actuals: Labour vs Other | 1.4 Plan vs Actual by Project No. | 1.5 Actuals by Project MCR")
     st.markdown("Overview by project and by month, with Labour vs Other split.")
 
     projects = db.get_projects()
@@ -231,106 +231,394 @@ if page == "🏠 Dashboard":
 
         df = pd.DataFrame(rows)
 
-        # KPI cards
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Projects", len(projects))
-        col2.metric("Total Budget", f"€ {df['Budget (€)'].sum():,.0f}")
-        col3.metric("Total Actuals", f"€ {df['Actuals (€)'].sum():,.0f}")
-        variance_total = df["Variance (€)"].sum()
-        col4.metric("Total Variance", f"€ {variance_total:,.0f}", delta=f"{variance_total:,.0f}")
+        with st.expander("📊 1.1 Project Summary", expanded=True):
+            # KPI cards
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Total Projects", len(projects))
+            col2.metric("Total Budget", f"€ {df['Budget (€)'].sum():,.0f}")
+            col3.metric("Total Actuals", f"€ {df['Actuals (€)'].sum():,.0f}")
+            variance_total = df["Variance (€)"].sum()
+            col4.metric("Total Variance", f"€ {variance_total:,.0f}", delta=f"{variance_total:,.0f}")
 
-        st.markdown("---")
-        render_table_view(
-            df,
-            key_prefix="dashboard_projects",
-            filter_columns=["Project", "Status", "RAG"],
-            total_columns=["Budget (€)", "Actuals (€)", "EAC (€)", "Variance (€)"],
-            show_totals=True,
-            hide_index=True,
-            currency_columns=["Budget (€)", "Actuals (€)", "EAC (€)", "Variance (€)"],
-        )
-
-        st.markdown("---")
-        # Budget vs Actuals bar chart
-        fig = go.Figure()
-        fig.add_trace(go.Bar(name="Budget", x=df["Project"], y=df["Budget (€)"], marker_color="#4C78A8"))
-        fig.add_trace(go.Bar(name="Actuals", x=df["Project"], y=df["Actuals (€)"], marker_color="#F58518"))
-        fig.add_trace(go.Bar(name="EAC", x=df["Project"], y=df["EAC (€)"], marker_color="#E45756"))
-        fig.update_layout(barmode="group", title="Budget vs Actuals vs EAC", height=400)
-        st.plotly_chart(fig, use_container_width=True)
-
-        # ── Monthly view with Labour vs Other split ─────────────────────────
-        monthly_rows = []
-        for p in projects:
-            actuals = db.get_actuals(p["id"])
-            for a in actuals:
-                try:
-                    month = pd.to_datetime(a.get("date"), errors="coerce")
-                    if pd.isna(month):
-                        continue
-                    month_str = month.strftime("%Y-%m")
-                except Exception:
-                    continue
-                cat = normalize_category(a.get("category", "Other"))
-                cost_type = "Labour" if cat == "Labour" else "Other"
-                monthly_rows.append({
-                    "Project": p["name"],
-                    "Month": month_str,
-                    "Cost Type": cost_type,
-                    "Amount": float(a.get("amount", 0) or 0),
-                })
-
-        if monthly_rows:
-            monthly_df = pd.DataFrame(monthly_rows)
-            monthly_agg = (
-                monthly_df.groupby(["Month", "Cost Type"], as_index=False)["Amount"]
-                .sum()
-                .sort_values("Month")
-            )
-
-            labour_total = monthly_agg[monthly_agg["Cost Type"] == "Labour"]["Amount"].sum()
-            other_total = monthly_agg[monthly_agg["Cost Type"] == "Other"]["Amount"].sum()
-            c1, c2 = st.columns(2)
-            c1.metric("Labour Actuals (all months)", f"€ {labour_total:,.0f}")
-            c2.metric("Other Actuals (all months)", f"€ {other_total:,.0f}")
-
-            fig_month = px.bar(
-                monthly_agg,
-                x="Month",
-                y="Amount",
-                color="Cost Type",
-                barmode="stack",
-                title="Monthly Actuals: Labour vs Other",
-                color_discrete_map={"Labour": "#4C78A8", "Other": "#F58518"},
-            )
-            st.plotly_chart(fig_month, use_container_width=True)
-
-            monthly_pivot = (
-                monthly_agg.pivot_table(index="Month", columns="Cost Type", values="Amount", aggfunc="sum", fill_value=0)
-                .reset_index()
-                .sort_values("Month")
-            )
-            if "Labour" not in monthly_pivot.columns:
-                monthly_pivot["Labour"] = 0.0
-            if "Other" not in monthly_pivot.columns:
-                monthly_pivot["Other"] = 0.0
-            monthly_pivot["Total"] = monthly_pivot["Labour"] + monthly_pivot["Other"]
-
-            st.markdown("**1.3.1 Monthly Actuals Table (€):**")
             render_table_view(
-                monthly_pivot.rename(columns={"Labour": "Labour (€)", "Other": "Other (€)", "Total": "Total (€)"}),
-                key_prefix="dashboard_monthly",
-                filter_columns=["Month"],
-                total_columns=["Labour (€)", "Other (€)", "Total (€)"],
+                df,
+                key_prefix="dashboard_projects",
+                filter_columns=["Project", "Status", "RAG"],
+                total_columns=["Budget (€)", "Actuals (€)", "EAC (€)", "Variance (€)"],
                 show_totals=True,
                 hide_index=True,
-                currency_columns=["Labour (€)", "Other (€)", "Total (€)"],
+                currency_columns=["Budget (€)", "Actuals (€)", "EAC (€)", "Variance (€)"],
             )
-        else:
-            st.info("No actuals available yet for monthly dashboard view.")
 
         st.markdown("---")
-        with st.expander("🧮 1.4 Group by Project MCR (pivot-style)", expanded=False):
+        with st.expander("📉 1.2 Budget vs Actuals vs EAC", expanded=True):
+            fig = go.Figure()
+            fig.add_trace(go.Bar(name="Budget", x=df["Project"], y=df["Budget (€)"], marker_color="#4C78A8"))
+            fig.add_trace(go.Bar(name="Actuals", x=df["Project"], y=df["Actuals (€)"], marker_color="#F58518"))
+            fig.add_trace(go.Bar(name="EAC", x=df["Project"], y=df["EAC (€)"], marker_color="#E45756"))
+            fig.update_layout(barmode="group", title="Budget vs Actuals vs EAC", height=400)
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("---")
+        with st.expander("📅 1.3 Monthly Actuals: Labour vs Other", expanded=True):
+            monthly_rows = []
+            for p in projects:
+                actuals = db.get_actuals(p["id"])
+                for a in actuals:
+                    try:
+                        month = pd.to_datetime(a.get("date"), errors="coerce")
+                        if pd.isna(month):
+                            continue
+                        month_str = month.strftime("%Y-%m")
+                    except Exception:
+                        continue
+                    cat = normalize_category(a.get("category", "Other"))
+                    cost_type = "Labour" if cat == "Labour" else "Other"
+                    monthly_rows.append({
+                        "Project": p["name"],
+                        "Month": month_str,
+                        "Cost Type": cost_type,
+                        "Amount": float(a.get("amount", 0) or 0),
+                    })
+
+            if monthly_rows:
+                monthly_df = pd.DataFrame(monthly_rows)
+                monthly_agg = (
+                    monthly_df.groupby(["Month", "Cost Type"], as_index=False)["Amount"]
+                    .sum()
+                    .sort_values("Month")
+                )
+
+                labour_total = monthly_agg[monthly_agg["Cost Type"] == "Labour"]["Amount"].sum()
+                other_total = monthly_agg[monthly_agg["Cost Type"] == "Other"]["Amount"].sum()
+                c1, c2 = st.columns(2)
+                c1.metric("Labour Actuals (all months)", f"€ {labour_total:,.0f}")
+                c2.metric("Other Actuals (all months)", f"€ {other_total:,.0f}")
+
+                fig_month = px.bar(
+                    monthly_agg,
+                    x="Month",
+                    y="Amount",
+                    color="Cost Type",
+                    barmode="stack",
+                    title="Monthly Actuals: Labour vs Other",
+                    color_discrete_map={"Labour": "#4C78A8", "Other": "#F58518"},
+                )
+                st.plotly_chart(fig_month, use_container_width=True)
+
+                monthly_pivot = (
+                    monthly_agg.pivot_table(index="Month", columns="Cost Type", values="Amount", aggfunc="sum", fill_value=0)
+                    .reset_index()
+                    .sort_values("Month")
+                )
+                if "Labour" not in monthly_pivot.columns:
+                    monthly_pivot["Labour"] = 0.0
+                if "Other" not in monthly_pivot.columns:
+                    monthly_pivot["Other"] = 0.0
+                monthly_pivot["Total"] = monthly_pivot["Labour"] + monthly_pivot["Other"]
+
+                st.markdown("**1.3.1 Monthly Actuals Table (€):**")
+                render_table_view(
+                    monthly_pivot.rename(columns={"Labour": "Labour (€)", "Other": "Other (€)", "Total": "Total (€)"}),
+                    key_prefix="dashboard_monthly",
+                    filter_columns=["Month"],
+                    total_columns=["Labour (€)", "Other (€)", "Total (€)"],
+                    show_totals=True,
+                    hide_index=True,
+                    currency_columns=["Labour (€)", "Other (€)", "Total (€)"],
+                )
+            else:
+                st.info("No actuals available yet for monthly dashboard view.")
+
+        st.markdown("---")
+        with st.expander("📈 1.4 Plan vs Actual by Project No. (monthly)", expanded=False):
+            st.caption(
+                "Shows monthly actuals stacked by Project No. and compares them against total monthly plan on the same axis. "
+                "Project No. corresponds to the MCR identifier (for example BM-00110021_002)."
+            )
+
+            _cmp_pmap = {p["name"]: p for p in projects}
+            _cmp_proj_name = st.selectbox(
+                "Project",
+                list(_cmp_pmap.keys()),
+                key="dash_plan_actual_project_sel",
+            )
+            _cmp_proj = _cmp_pmap[_cmp_proj_name]
+
+            _cmp_tasks = db.get_plan_tasks(_cmp_proj["id"])
+            _cmp_actuals = db.get_actuals(_cmp_proj["id"])
+            if not _cmp_tasks and not _cmp_actuals:
+                st.info("No plan or actual data found for this project.")
+            else:
+                _cmp_vmap = db.get_plan_values_for_project(_cmp_proj["id"])
+                _cmp_tvmap = db.get_plan_text_values_for_project(_cmp_proj["id"])
+                _cmp_cols = db.get_plan_columns(_cmp_proj["id"])
+
+                def _cmp_norm_key(_s):
+                    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(_s or "").strip().lower()).split())
+
+                def _cmp_canonical_project_no(_raw):
+                    _txt = str(_raw or "").strip()
+                    if not _txt:
+                        return "Unmapped Project No."
+                    # Normalize values like "BM-00110021_005 - C-Hub ..." to "BM-00110021_005".
+                    _m = re.search(r"([A-Za-z]{2,}-\d+_\d+)", _txt)
+                    return _m.group(1) if _m else _txt
+
+                def _cmp_is_project_no_col(_col_meta):
+                    _norm_key = _cmp_norm_key(_col_meta.get("col_key"))
+                    _norm_label = _cmp_norm_key(_col_meta.get("col_label"))
+                    _preferred = {
+                        "custom project mcr",
+                        "project mcr",
+                        "project no",
+                        "project number",
+                        "prj mcr number",
+                        "mcr number",
+                    }
+                    if _norm_key in _preferred or _norm_label in _preferred:
+                        return True
+                    return (
+                        ("mcr" in _norm_key and "number" in _norm_key)
+                        or ("mcr" in _norm_label and "number" in _norm_label)
+                        or ("project" in _norm_key and "number" in _norm_key)
+                        or ("project" in _norm_label and "number" in _norm_label)
+                        or _norm_key.endswith("project no")
+                        or _norm_label.endswith("project no")
+                    )
+
+                _cmp_mcr_col = next(
+                    (c.get("col_key") for c in _cmp_cols if _cmp_is_project_no_col(c)),
+                    None,
+                )
+
+                try:
+                    _cs = datetime.date.fromisoformat(_cmp_proj.get("start_date") or "")
+                    _ce = datetime.date.fromisoformat(_cmp_proj.get("end_date") or "")
+                except Exception:
+                    _cs = datetime.date.today().replace(day=1)
+                    _ce = _cs.replace(year=_cs.year + 1)
+
+                _cmp_months = []
+                _cur = _cs.replace(day=1)
+                while _cur <= _ce.replace(day=1):
+                    _cmp_months.append(_cur.strftime("%Y-%m"))
+                    if _cur.month == 12:
+                        _cur = _cur.replace(year=_cur.year + 1, month=1)
+                    else:
+                        _cur = _cur.replace(month=_cur.month + 1)
+
+                _plan_rows = []
+                for _t in _cmp_tasks:
+                    _tid = int(_t["id"])
+                    _pno = ""
+                    if _cmp_mcr_col:
+                        _pno = str(_cmp_tvmap.get((_tid, _cmp_mcr_col), "") or "").strip()
+                        if not _pno:
+                            _pno = str(_cmp_vmap.get((_tid, _cmp_mcr_col), "") or "").strip()
+                    _pno = _cmp_canonical_project_no(_pno)
+                    for _m in _cmp_months:
+                        _plan_rows.append(
+                            {
+                                "Project No.": _pno,
+                                "Month": _m,
+                                "Plan (\u20ac)": float(_cmp_vmap.get((_tid, _m), 0.0) or 0.0),
+                            }
+                        )
+
+                _act_rows = []
+                for _a in _cmp_actuals:
+                    _dt = pd.to_datetime(_a.get("date"), errors="coerce")
+                    if pd.isna(_dt):
+                        continue
+                    _m = _dt.strftime("%Y-%m")
+                    if _m not in _cmp_months:
+                        continue
+                    _pno = _cmp_canonical_project_no(_a.get("project_no"))
+                    _act_rows.append(
+                        {
+                            "Project No.": _pno,
+                            "Month": _m,
+                            "Actual (\u20ac)": float(_a.get("amount", 0.0) or 0.0),
+                        }
+                    )
+
+                _plan_df = pd.DataFrame(_plan_rows)
+                if _plan_df.empty:
+                    _plan_agg = pd.DataFrame(columns=["Project No.", "Month", "Plan (\u20ac)"])
+                else:
+                    _plan_agg = _plan_df.groupby(["Project No.", "Month"], as_index=False)["Plan (\u20ac)"].sum()
+
+                _act_df = pd.DataFrame(_act_rows)
+                if _act_df.empty:
+                    _act_agg = pd.DataFrame(columns=["Project No.", "Month", "Actual (\u20ac)"])
+                else:
+                    _act_agg = _act_df.groupby(["Project No.", "Month"], as_index=False)["Actual (\u20ac)"].sum()
+
+                _cmp_df = _plan_agg.merge(_act_agg, on=["Project No.", "Month"], how="outer").fillna(0.0)
+                if _cmp_df.empty:
+                    st.info("No comparable monthly plan/actual data found.")
+                else:
+                    _cmp_df["Variance (\u20ac)"] = _cmp_df["Plan (\u20ac)"] - _cmp_df["Actual (\u20ac)"]
+                    _cmp_df = _cmp_df.sort_values(["Project No.", "Month"]).reset_index(drop=True)
+
+                    _all_pnos = sorted(_cmp_df["Project No."].astype(str).unique().tolist())
+                    _sel_pnos = st.multiselect(
+                        "Filter Project No.",
+                        _all_pnos,
+                        default=_all_pnos,
+                        key="dash_plan_actual_project_no_filter",
+                    )
+                    _view_df = _cmp_df[_cmp_df["Project No."].isin(_sel_pnos)].copy() if _sel_pnos else _cmp_df.iloc[0:0].copy()
+
+                    if _view_df.empty:
+                        st.info("No rows for selected Project No. filter.")
+                    else:
+                        _month_order = _cmp_months  # always show all project months on x-axis
+                        _actual_stacked = (
+                            _view_df.groupby(["Month", "Project No."], as_index=False)["Actual (\u20ac)"]
+                            .sum()
+                            .rename(columns={"Actual (\u20ac)": "Amount"})
+                        )
+                        _actual_visible_pnos = set(
+                            _actual_stacked.loc[_actual_stacked["Amount"] > 0, "Project No."].astype(str).tolist()
+                        )
+                        _actual_stacked = _actual_stacked[
+                            _actual_stacked["Project No."].astype(str).isin(_actual_visible_pnos)
+                        ].copy()
+                        _actual_stacked["Series"] = "Actual \u2013 " + _actual_stacked["Project No."].astype(str)
+
+                        _plan_total = (
+                            _view_df.groupby("Month", as_index=False)["Plan (\u20ac)"]
+                            .sum()
+                            .rename(columns={"Plan (\u20ac)": "Amount"})
+                        )
+                        _plan_total["Project No."] = "(total plan)"
+                        _plan_total["Series"] = "Total Plan"
+
+                        _actual_total = (
+                            _actual_stacked.groupby("Month", as_index=False)["Amount"]
+                            .sum()
+                            .rename(columns={"Amount": "Actual Total (\u20ac)"})
+                        )
+
+                        _cum_df = (
+                            _plan_total[["Month", "Amount"]]
+                            .rename(columns={"Amount": "Plan Total (\u20ac)"})
+                            .merge(_actual_total, on="Month", how="outer")
+                            .fillna(0.0)
+                        )
+                        _cum_df["Month"] = pd.Categorical(_cum_df["Month"], categories=_month_order, ordered=True)
+                        _cum_df = _cum_df.sort_values("Month").reset_index(drop=True)
+                        _cum_df["Plan Cum (\u20ac)"] = _cum_df["Plan Total (\u20ac)"].cumsum()
+                        _cum_df["Actual Cum (\u20ac)"] = _cum_df["Actual Total (\u20ac)"].cumsum()
+
+                        # ── Estimated Actuals projection ──────────────────────────────────
+                        # Exclude the current month (likely incomplete) from the average.
+                        # Only months before the current calendar month are treated as complete.
+                        _current_ym = datetime.date.today().strftime("%Y-%m")
+                        _months_with_actuals = _cum_df.loc[
+                            (_cum_df["Actual Total (\u20ac)"] > 0) & (_cum_df["Month"].astype(str) < _current_ym),
+                            "Month",
+                        ].astype(str).tolist()
+                        _proj_x = []
+                        _proj_y = []
+                        if _months_with_actuals:
+                            _last_actual_month = _months_with_actuals[-1]
+                            _last_actual_idx = _cum_df[_cum_df["Month"].astype(str) == _last_actual_month].index[-1]
+                            _months_with_data_count = len(_months_with_actuals)
+                            _cum_at_last = float(_cum_df.at[_last_actual_idx, "Actual Cum (\u20ac)"])
+                            _avg_monthly = _cum_at_last / _months_with_data_count if _months_with_data_count > 0 else 0.0
+                            # Projection starts at the anchor point so the line connects visually.
+                            _proj_x = [_last_actual_month]
+                            _proj_y = [_cum_at_last]
+                            _running = _cum_at_last
+                            for _fm in _month_order[_last_actual_idx + 1:]:
+                                _running += _avg_monthly
+                                _proj_x.append(str(_fm))
+                                _proj_y.append(_running)
+
+                        _chart_df = pd.concat([_actual_stacked, _plan_total], ignore_index=True)
+                        _chart = px.bar(
+                            _chart_df,
+                            x="Month",
+                            y="Amount",
+                            color="Series",
+                            barmode="stack",
+                            category_orders={"Month": _month_order},
+                            height=460,
+                            title="Monthly Actuals by Project No. (stacked bars) vs Total Monthly Plan",
+                        )
+                        for _tr in _chart.data:
+                            _tr.marker.line.width = 0
+                            if _tr.name == "Total Plan":
+                                _tr.offsetgroup = "plan"
+                                _tr.marker.pattern.shape = "/"
+                                _tr.opacity = 0.9
+                            else:
+                                _tr.offsetgroup = "actual"
+                        _chart.add_trace(
+                            go.Scatter(
+                                x=_cum_df["Month"].astype(str),
+                                y=_cum_df["Plan Cum (\u20ac)"],
+                                mode="lines+markers",
+                                name="Cumulative Plan",
+                                line={"dash": "dash", "width": 2},
+                                marker={"size": 6},
+                            )
+                        )
+                        _cum_actual_df = _cum_df[_cum_df["Month"].astype(str) < _current_ym]
+                        _chart.add_trace(
+                            go.Scatter(
+                                x=_cum_actual_df["Month"].astype(str),
+                                y=_cum_actual_df["Actual Cum (\u20ac)"],
+                                mode="lines+markers",
+                                name="Cumulative Actual",
+                                line={"dash": "dash", "width": 2},
+                                marker={"size": 6},
+                            )
+                        )
+                        if len(_proj_x) > 1:
+                            _chart.add_trace(
+                                go.Scatter(
+                                    x=_proj_x,
+                                    y=_proj_y,
+                                    mode="lines+markers",
+                                    name="Estimated Actuals (projection)",
+                                    line={"dash": "dot", "width": 2},
+                                    marker={"size": 5, "symbol": "circle-open"},
+                                )
+                            )
+                        _chart.update_layout(
+                            legend_title_text="Series",
+                            xaxis_title="Month",
+                            yaxis_title="Amount (\u20ac)",
+                            bargap=0.2,
+                            bargroupgap=0.08,
+                            xaxis={
+                                "tickmode": "array",
+                                "tickvals": _month_order,
+                                "ticktext": _month_order,
+                                "tickangle": -45,
+                            },
+                        )
+                        st.plotly_chart(_chart, use_container_width=True)
+
+                        st.dataframe(
+                            _view_df,
+                            hide_index=True,
+                            use_container_width=True,
+                            column_config={
+                                "Project No.": st.column_config.TextColumn("Project No."),
+                                "Month": st.column_config.TextColumn("Month"),
+                                "Plan (\u20ac)": st.column_config.NumberColumn("Plan (\u20ac)", format="\u20ac %,.2f"),
+                                "Actual (\u20ac)": st.column_config.NumberColumn("Actual (\u20ac)", format="\u20ac %,.2f"),
+                                "Variance (\u20ac)": st.column_config.NumberColumn("Variance (\u20ac)", format="\u20ac %,.2f"),
+                            },
+                        )
+
+        st.markdown("---")
+        with st.expander("🧮 1.5 Actuals by Project MCR (pivot-style)", expanded=False):
             st.caption(
                 "Collapsed: one row per Project MCR with aggregated totals. "
                 "Expanded: shows totals per Task Name under that Project MCR."
@@ -355,11 +643,29 @@ if page == "🏠 Dashboard":
                 def _norm_key(_s):
                     return " ".join(re.sub(r"[^a-z0-9]+", " ", str(_s or "").strip().lower()).split())
 
-                _dash_col_keys = [c.get("col_key") for c in _dash_cols]
-                _mcr_group_col = "custom_project_mcr"
-                if _mcr_group_col not in _dash_col_keys:
-                    _mcr_group_col = next((k for k in _dash_col_keys if _norm_key(k) == "custom project mcr"), None)
+                def _is_mcr_col(_col_meta):
+                    _nk = _norm_key(_col_meta.get("col_key"))
+                    _nl = _norm_key(_col_meta.get("col_label"))
+                    _preferred = {
+                        "custom project mcr", "project mcr", "project no",
+                        "project number", "prj mcr number", "mcr number",
+                    }
+                    if _nk in _preferred or _nl in _preferred:
+                        return True
+                    return (
+                        ("mcr" in _nk and "number" in _nk)
+                        or ("mcr" in _nl and "number" in _nl)
+                        or ("project" in _nk and "number" in _nk)
+                        or ("project" in _nl and "number" in _nl)
+                        or _nk.endswith("project no")
+                        or _nl.endswith("project no")
+                    )
 
+                _mcr_group_col = next(
+                    (c.get("col_key") for c in _dash_cols if _is_mcr_col(c)), None
+                )
+
+                _dash_col_keys = [c.get("col_key") for c in _dash_cols]
                 _rg_type_col = next(
                     (
                         k for k in _dash_col_keys
@@ -370,7 +676,7 @@ if page == "🏠 Dashboard":
                 )
 
                 if not _mcr_group_col:
-                    st.info("Custom column 'custom_project_mcr' not found for this project.")
+                    st.info("No Project MCR / Project No. column found for this project.")
                 else:
                     try:
                         _ds = datetime.date.fromisoformat(_dash_proj.get("start_date") or "")
@@ -476,292 +782,6 @@ if page == "🏠 Dashboard":
                             "Total (€)": st.column_config.NumberColumn("Total (€)", format="€ %,.2f"),
                         },
                     )
-
-        with st.expander("📈 1.5 Plan vs Actual by Project No. (monthly)", expanded=False):
-            st.caption(
-                "Shows monthly actuals stacked by Project No. and compares them against total monthly plan on the same axis. "
-                "Project No. corresponds to the MCR identifier (for example BM-00110021_002)."
-            )
-
-            _cmp_pmap = {p["name"]: p for p in projects}
-            _cmp_proj_name = st.selectbox(
-                "Project",
-                list(_cmp_pmap.keys()),
-                key="dash_plan_actual_project_sel",
-            )
-            _cmp_proj = _cmp_pmap[_cmp_proj_name]
-
-            _cmp_tasks = db.get_plan_tasks(_cmp_proj["id"])
-            _cmp_actuals = db.get_actuals(_cmp_proj["id"])
-            if not _cmp_tasks and not _cmp_actuals:
-                st.info("No plan or actual data found for this project.")
-            else:
-                _cmp_vmap = db.get_plan_values_for_project(_cmp_proj["id"])
-                _cmp_tvmap = db.get_plan_text_values_for_project(_cmp_proj["id"])
-                _cmp_cols = db.get_plan_columns(_cmp_proj["id"])
-
-                def _cmp_norm_key(_s):
-                    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(_s or "").strip().lower()).split())
-
-                def _cmp_canonical_project_no(_raw):
-                    _txt = str(_raw or "").strip()
-                    if not _txt:
-                        return "Unmapped Project No."
-                    # Normalize values like "BM-00110021_005 - C-Hub ..." to "BM-00110021_005".
-                    _m = re.search(r"([A-Za-z]{2,}-\d+_\d+)", _txt)
-                    return _m.group(1) if _m else _txt
-
-                def _cmp_is_project_no_col(_col_meta):
-                    _norm_key = _cmp_norm_key(_col_meta.get("col_key"))
-                    _norm_label = _cmp_norm_key(_col_meta.get("col_label"))
-                    _preferred = {
-                        "custom project mcr",
-                        "project mcr",
-                        "project no",
-                        "project number",
-                        "prj mcr number",
-                        "mcr number",
-                    }
-                    if _norm_key in _preferred or _norm_label in _preferred:
-                        return True
-                    return (
-                        ("mcr" in _norm_key and "number" in _norm_key)
-                        or ("mcr" in _norm_label and "number" in _norm_label)
-                        or ("project" in _norm_key and "number" in _norm_key)
-                        or ("project" in _norm_label and "number" in _norm_label)
-                        or _norm_key.endswith("project no")
-                        or _norm_label.endswith("project no")
-                    )
-
-                _cmp_mcr_col = next(
-                    (c.get("col_key") for c in _cmp_cols if _cmp_is_project_no_col(c)),
-                    None,
-                )
-
-                try:
-                    _cs = datetime.date.fromisoformat(_cmp_proj.get("start_date") or "")
-                    _ce = datetime.date.fromisoformat(_cmp_proj.get("end_date") or "")
-                except Exception:
-                    _cs = datetime.date.today().replace(day=1)
-                    _ce = _cs.replace(year=_cs.year + 1)
-
-                _cmp_months = []
-                _cur = _cs.replace(day=1)
-                while _cur <= _ce.replace(day=1):
-                    _cmp_months.append(_cur.strftime("%Y-%m"))
-                    if _cur.month == 12:
-                        _cur = _cur.replace(year=_cur.year + 1, month=1)
-                    else:
-                        _cur = _cur.replace(month=_cur.month + 1)
-
-                _plan_rows = []
-                for _t in _cmp_tasks:
-                    _tid = int(_t["id"])
-                    _pno = ""
-                    if _cmp_mcr_col:
-                        _pno = str(_cmp_tvmap.get((_tid, _cmp_mcr_col), "") or "").strip()
-                        if not _pno:
-                            _pno = str(_cmp_vmap.get((_tid, _cmp_mcr_col), "") or "").strip()
-                    _pno = _cmp_canonical_project_no(_pno)
-                    for _m in _cmp_months:
-                        _plan_rows.append(
-                            {
-                                "Project No.": _pno,
-                                "Month": _m,
-                                "Plan (€)": float(_cmp_vmap.get((_tid, _m), 0.0) or 0.0),
-                            }
-                        )
-
-                _act_rows = []
-                for _a in _cmp_actuals:
-                    _dt = pd.to_datetime(_a.get("date"), errors="coerce")
-                    if pd.isna(_dt):
-                        continue
-                    _m = _dt.strftime("%Y-%m")
-                    if _m not in _cmp_months:
-                        continue
-                    _pno = _cmp_canonical_project_no(_a.get("project_no"))
-                    _act_rows.append(
-                        {
-                            "Project No.": _pno,
-                            "Month": _m,
-                            "Actual (€)": float(_a.get("amount", 0.0) or 0.0),
-                        }
-                    )
-
-                _plan_df = pd.DataFrame(_plan_rows)
-                if _plan_df.empty:
-                    _plan_agg = pd.DataFrame(columns=["Project No.", "Month", "Plan (€)"])
-                else:
-                    _plan_agg = _plan_df.groupby(["Project No.", "Month"], as_index=False)["Plan (€)"].sum()
-
-                _act_df = pd.DataFrame(_act_rows)
-                if _act_df.empty:
-                    _act_agg = pd.DataFrame(columns=["Project No.", "Month", "Actual (€)"])
-                else:
-                    _act_agg = _act_df.groupby(["Project No.", "Month"], as_index=False)["Actual (€)"].sum()
-
-                _cmp_df = _plan_agg.merge(_act_agg, on=["Project No.", "Month"], how="outer").fillna(0.0)
-                if _cmp_df.empty:
-                    st.info("No comparable monthly plan/actual data found.")
-                else:
-                    _cmp_df["Variance (€)"] = _cmp_df["Plan (€)"] - _cmp_df["Actual (€)"]
-                    _cmp_df = _cmp_df.sort_values(["Project No.", "Month"]).reset_index(drop=True)
-
-                    _all_pnos = sorted(_cmp_df["Project No."].astype(str).unique().tolist())
-                    _sel_pnos = st.multiselect(
-                        "Filter Project No.",
-                        _all_pnos,
-                        default=_all_pnos,
-                        key="dash_plan_actual_project_no_filter",
-                    )
-                    _view_df = _cmp_df[_cmp_df["Project No."].isin(_sel_pnos)].copy() if _sel_pnos else _cmp_df.iloc[0:0].copy()
-
-                    if _view_df.empty:
-                        st.info("No rows for selected Project No. filter.")
-                    else:
-                        _month_order = _cmp_months  # always show all project months on x-axis
-                        _actual_stacked = (
-                            _view_df.groupby(["Month", "Project No."], as_index=False)["Actual (€)"]
-                            .sum()
-                            .rename(columns={"Actual (€)": "Amount"})
-                        )
-                        _actual_visible_pnos = set(
-                            _actual_stacked.loc[_actual_stacked["Amount"] > 0, "Project No."].astype(str).tolist()
-                        )
-                        _actual_stacked = _actual_stacked[
-                            _actual_stacked["Project No."].astype(str).isin(_actual_visible_pnos)
-                        ].copy()
-                        _actual_stacked["Series"] = "Actual – " + _actual_stacked["Project No."].astype(str)
-
-                        _plan_total = (
-                            _view_df.groupby("Month", as_index=False)["Plan (€)"]
-                            .sum()
-                            .rename(columns={"Plan (€)": "Amount"})
-                        )
-                        _plan_total["Project No."] = "(total plan)"
-                        _plan_total["Series"] = "Total Plan"
-
-                        _actual_total = (
-                            _actual_stacked.groupby("Month", as_index=False)["Amount"]
-                            .sum()
-                            .rename(columns={"Amount": "Actual Total (€)"})
-                        )
-
-                        _cum_df = (
-                            _plan_total[["Month", "Amount"]]
-                            .rename(columns={"Amount": "Plan Total (€)"})
-                            .merge(_actual_total, on="Month", how="outer")
-                            .fillna(0.0)
-                        )
-                        _cum_df["Month"] = pd.Categorical(_cum_df["Month"], categories=_month_order, ordered=True)
-                        _cum_df = _cum_df.sort_values("Month").reset_index(drop=True)
-                        _cum_df["Plan Cum (€)"] = _cum_df["Plan Total (€)"].cumsum()
-                        _cum_df["Actual Cum (€)"] = _cum_df["Actual Total (€)"].cumsum()
-
-                        # ── Estimated Actuals projection ──────────────────────────────────
-                        # Exclude the current month (likely incomplete) from the average.
-                        # Only months before the current calendar month are treated as complete.
-                        _current_ym = datetime.date.today().strftime("%Y-%m")
-                        _months_with_actuals = _cum_df.loc[
-                            (_cum_df["Actual Total (€)"] > 0) & (_cum_df["Month"].astype(str) < _current_ym),
-                            "Month",
-                        ].astype(str).tolist()
-                        _proj_x = []
-                        _proj_y = []
-                        if _months_with_actuals:
-                            _last_actual_month = _months_with_actuals[-1]
-                            _last_actual_idx = _cum_df[_cum_df["Month"].astype(str) == _last_actual_month].index[-1]
-                            _months_with_data_count = len(_months_with_actuals)
-                            _cum_at_last = float(_cum_df.at[_last_actual_idx, "Actual Cum (€)"])
-                            _avg_monthly = _cum_at_last / _months_with_data_count if _months_with_data_count > 0 else 0.0
-                            # Projection starts at the anchor point so the line connects visually.
-                            _proj_x = [_last_actual_month]
-                            _proj_y = [_cum_at_last]
-                            _running = _cum_at_last
-                            for _fm in _month_order[_last_actual_idx + 1:]:
-                                _running += _avg_monthly
-                                _proj_x.append(str(_fm))
-                                _proj_y.append(_running)
-
-                        _chart_df = pd.concat([_actual_stacked, _plan_total], ignore_index=True)
-                        _chart = px.bar(
-                            _chart_df,
-                            x="Month",
-                            y="Amount",
-                            color="Series",
-                            barmode="stack",
-                            category_orders={"Month": _month_order},
-                            height=460,
-                            title="Monthly Actuals by Project No. (stacked bars) vs Total Monthly Plan",
-                        )
-                        for _tr in _chart.data:
-                            _tr.marker.line.width = 0
-                            if _tr.name == "Total Plan":
-                                _tr.offsetgroup = "plan"
-                                _tr.marker.pattern.shape = "/"
-                                _tr.opacity = 0.9
-                            else:
-                                _tr.offsetgroup = "actual"
-                        _chart.add_trace(
-                            go.Scatter(
-                                x=_cum_df["Month"].astype(str),
-                                y=_cum_df["Plan Cum (€)"],
-                                mode="lines+markers",
-                                name="Cumulative Plan",
-                                line={"dash": "dash", "width": 2},
-                                marker={"size": 6},
-                            )
-                        )
-                        _cum_actual_df = _cum_df[_cum_df["Month"].astype(str) < _current_ym]
-                        _chart.add_trace(
-                            go.Scatter(
-                                x=_cum_actual_df["Month"].astype(str),
-                                y=_cum_actual_df["Actual Cum (€)"],
-                                mode="lines+markers",
-                                name="Cumulative Actual",
-                                line={"dash": "dash", "width": 2},
-                                marker={"size": 6},
-                            )
-                        )
-                        if len(_proj_x) > 1:
-                            _chart.add_trace(
-                                go.Scatter(
-                                    x=_proj_x,
-                                    y=_proj_y,
-                                    mode="lines+markers",
-                                    name="Estimated Actuals (projection)",
-                                    line={"dash": "dot", "width": 2},
-                                    marker={"size": 5, "symbol": "circle-open"},
-                                )
-                            )
-                        _chart.update_layout(
-                            legend_title_text="Series",
-                            xaxis_title="Month",
-                            yaxis_title="Amount (€)",
-                            bargap=0.2,
-                            bargroupgap=0.08,
-                            xaxis={
-                                "tickmode": "array",
-                                "tickvals": _month_order,
-                                "ticktext": _month_order,
-                                "tickangle": -45,
-                            },
-                        )
-                        st.plotly_chart(_chart, use_container_width=True)
-
-                        st.dataframe(
-                            _view_df,
-                            hide_index=True,
-                            use_container_width=True,
-                            column_config={
-                                "Project No.": st.column_config.TextColumn("Project No."),
-                                "Month": st.column_config.TextColumn("Month"),
-                                "Plan (€)": st.column_config.NumberColumn("Plan (€)", format="€ %,.2f"),
-                                "Actual (€)": st.column_config.NumberColumn("Actual (€)", format="€ %,.2f"),
-                                "Variance (€)": st.column_config.NumberColumn("Variance (€)", format="€ %,.2f"),
-                            },
-                        )
 
 # ════════════════════════════════════════════════════════════════════════════
 # 2. PROJECTS

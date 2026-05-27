@@ -1,5 +1,5 @@
 """
-db.py - Database layer for Budget Planner
+db.py - Database layer for Budget Management Assistant
 All SQLite operations live here.
 """
 

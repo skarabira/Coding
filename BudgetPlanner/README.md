@@ -1,10 +1,10 @@
-# Budget Planner – AI-Assisted PM Budget Management
+# Budget Management Assistant – AI-Assisted PM Budget Management
 
-Streamline your project budgeting workflow with Budget Planner, a unified platform for planning costs, importing actuals, and tracking budget performance in real time.
+Streamline your project budgeting workflow with Budget Management Assistant, a unified platform for planning costs, importing actuals, and tracking budget performance in real time.
 
 ## What It Does
 
-**Budget Planner** helps teams move from spreadsheets to a structured, data-driven budgeting process. Import both labor and non-labor costs, compare actuals against your plan, and spot variances before they become problems.
+**Budget Management Assistant** helps teams move from spreadsheets to a structured, data-driven budgeting process. Import both labor and non-labor costs, compare actuals against your plan, and spot variances before they become problems.
 
 **Key capabilities:**
 - 📊 **Plan & Track** – Create flexible task-based budgets with monthly allocations
