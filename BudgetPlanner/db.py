@@ -79,6 +79,26 @@ def init_db():
             updated_at  TEXT DEFAULT (date('now')),
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS forecast_adjustments (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id  INTEGER NOT NULL,
+            mcr_key     TEXT NOT NULL,
+            task_name   TEXT NOT NULL DEFAULT '',
+            correction  REAL DEFAULT 0,
+            updated_at  TEXT DEFAULT (datetime('now')),
+            UNIQUE(project_id, mcr_key, task_name),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS task_name_mappings (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id  INTEGER NOT NULL,
+            actual_task_name TEXT NOT NULL,
+            plan_task_name TEXT NOT NULL,
+            created_at  TEXT DEFAULT (datetime('now')),
+            UNIQUE(project_id, actual_task_name),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
 
         CREATE TABLE IF NOT EXISTS import_profiles (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -212,6 +232,52 @@ def init_db():
     if "data_type" not in plan_col_cols:
         c.execute("ALTER TABLE plan_columns ADD COLUMN data_type TEXT DEFAULT 'decimal'")
 
+    # Migration: add actual_mcr column to task_name_mappings and update UNIQUE constraint.
+    # SQLite cannot alter constraints so we recreate the table when the column is missing.
+    tnm_cols = [r["name"] for r in c.execute("PRAGMA table_info(task_name_mappings)").fetchall()]
+    if "actual_mcr" not in tnm_cols:
+        c.executescript("""
+            CREATE TABLE IF NOT EXISTS task_name_mappings_new (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id       INTEGER NOT NULL,
+                actual_task_name TEXT NOT NULL,
+                actual_mcr       TEXT NOT NULL DEFAULT '',
+                plan_task_name   TEXT NOT NULL,
+                created_at       TEXT DEFAULT (datetime('now')),
+                UNIQUE(project_id, actual_task_name, actual_mcr),
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+            INSERT INTO task_name_mappings_new
+                (project_id, actual_task_name, actual_mcr, plan_task_name, created_at)
+            SELECT project_id, actual_task_name, '', plan_task_name, created_at
+            FROM task_name_mappings;
+            DROP TABLE task_name_mappings;
+            ALTER TABLE task_name_mappings_new RENAME TO task_name_mappings;
+        """)
+
+    # Migration: add forecast_overrides table for user-modified plan values
+    fco_exists = c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='forecast_overrides'"
+    ).fetchone()
+    if not fco_exists:
+        c.execute("""
+            CREATE TABLE forecast_overrides (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id    INTEGER NOT NULL,
+                task_id       INTEGER,
+                mcr           TEXT NOT NULL,
+                month_year    TEXT NOT NULL,
+                override_amount REAL NOT NULL,
+                created_at    TEXT DEFAULT (datetime('now')),
+                modified_at   TEXT DEFAULT (datetime('now')),
+                UNIQUE(project_id, task_id, mcr, month_year),
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )
+        """)
+
+    conn.commit()
+    conn.close()
+
     conn.commit()
     conn.close()
 
@@ -237,7 +303,7 @@ def ensure_default_import_profiles():
     conn.close()
 
 
-# ── Projects ────────────────────────────────────────────────────────────────
+# â”€â”€ Projects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def get_projects():
     conn = get_conn()
@@ -273,7 +339,7 @@ def delete_project(project_id):
     conn.close()
 
 
-# ── Budget Items ─────────────────────────────────────────────────────────────
+# â”€â”€ Budget Items â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def get_budget_items(project_id):
     conn = get_conn()
@@ -312,7 +378,7 @@ def delete_budget_item(item_id):
     conn.close()
 
 
-# ── Actuals ──────────────────────────────────────────────────────────────────
+# â”€â”€ Actuals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def get_actuals(project_id):
     conn = get_conn()
@@ -410,7 +476,7 @@ def get_last_import_run(project_id, import_type):
     return dict(row) if row else None
 
 
-# ── Import Mapping Profiles ──────────────────────────────────────────────────
+# â”€â”€ Import Mapping Profiles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def get_import_profiles(profile_type="actuals"):
     conn = get_conn()
@@ -468,7 +534,7 @@ def delete_import_profile(profile_name, profile_type="actuals"):
     conn.close()
 
 
-# ── Labour Task Mappings ─────────────────────────────────────────────────────
+# â”€â”€ Labour Task Mappings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def get_labour_task_mappings(active_only=False):
     conn = get_conn()
@@ -688,7 +754,7 @@ def resolve_labour_task_mapping(project_no, employee_name, resource_group):
     return dict(row) if row else None
 
 
-# ── Forecasts ─────────────────────────────────────────────────────────────────
+# â”€â”€ Forecasts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def get_forecasts(project_id):
     conn = get_conn()
@@ -720,8 +786,43 @@ def upsert_forecast(project_id, category, etc, note):
     conn.close()
 
 
-# ── Summary helpers ───────────────────────────────────────────────────────────
+# â”€â”€ Summary helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+
+def get_forecast_adjustments(project_id):
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM forecast_adjustments WHERE project_id=? ORDER BY mcr_key, task_name",
+        (project_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def upsert_forecast_adjustment(project_id, mcr_key, task_name, correction):
+    conn = get_conn()
+    mcr_key = str(mcr_key or "").strip()
+    task_name = str(task_name or "").strip()
+    if not mcr_key:
+        conn.close()
+        return
+
+    existing = conn.execute(
+        "SELECT id FROM forecast_adjustments WHERE project_id=? AND mcr_key=? AND task_name=?",
+        (project_id, mcr_key, task_name),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE forecast_adjustments SET correction=?, updated_at=datetime('now') WHERE id=?",
+            (float(correction or 0.0), existing["id"]),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO forecast_adjustments (project_id, mcr_key, task_name, correction) VALUES (?,?,?,?)",
+            (project_id, mcr_key, task_name, float(correction or 0.0)),
+        )
+    conn.commit()
+    conn.close()
 def get_project_summary(project_id):
     """Returns total planned, actual, forecast (EAC) for a project."""
     conn = get_conn()
@@ -763,7 +864,7 @@ def get_project_summary(project_id):
     return {"planned": planned, "actual": actual, "etc": etc, "eac": eac, "variance": variance}
 
 
-# ── Budget Plan Tasks ────────────────────────────────────────────────────────
+# â”€â”€ Budget Plan Tasks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def get_plan_tasks(project_id, active_only=True):
     conn = get_conn()
@@ -812,7 +913,7 @@ def delete_plan_task(task_id):
     conn.close()
 
 
-# ── Budget Plan Values ───────────────────────────────────────────────────────
+# â”€â”€ Budget Plan Values â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def get_plan_values_for_project(project_id):
     """Return dict: (task_id, col_key) -> value for all tasks in project."""
@@ -876,7 +977,7 @@ def upsert_plan_text_value(task_id, col_key, text_value, updated_by=""):
     conn.close()
 
 
-# ── Budget Plan Custom Columns ───────────────────────────────────────────────
+# â”€â”€ Budget Plan Custom Columns â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def get_plan_columns(project_id):
     conn = get_conn()
@@ -966,7 +1067,7 @@ def set_plan_user_preference(project_id, user_name, pref_key, pref_value):
     conn.close()
 
 
-# ── Budget Plan Baselines ────────────────────────────────────────────────────
+# â”€â”€ Budget Plan Baselines â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def get_plan_baselines(project_id):
     conn = get_conn()
@@ -1018,7 +1119,7 @@ def delete_plan_baseline(baseline_id):
     conn.close()
 
 
-# ── Budget Plan Audit Log ────────────────────────────────────────────────────
+# â”€â”€ Budget Plan Audit Log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def add_plan_audit(project_id, task_id, task_name, col_key, old_value, new_value, action="update", changed_by=""):
     conn = get_conn()
