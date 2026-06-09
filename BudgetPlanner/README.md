@@ -52,11 +52,54 @@ This application supports end-to-end project cost management:
 
 ## Current Core Features
 
-### 1. Project Management
+### 1. Dashboard
+- Project summary with RAG status (Red/Green based on variance).
+- Budget vs Actuals vs EAC comparison (EAC calculated from section 5.1 logic):
+  - **EAC calculation**: Sum of actuals for past months + plan values for future months.
+  - **Exact source alignment**: sections 1.1 and 1.2 now consume the exact section 5.1 displayed total (cached from the 5.1 total row calculation).
+  - **Variance calculation**: variance is shown as `EAC - Budget`; positive values indicate overbudget and negative values indicate underspend/savings.
+  - Allows real-time tracking of project financial health.
+- Monthly actuals trends (Labour vs Other).
+- Project MCR analysis and cross-check validation.
+- Section 1.5 Estimated Actuals (projection) is now aligned to the section 5.1 project-only EAC logic (excluding financial risks), including forecast overrides. **Fixed (June 8, 2026):** Section 1.5 now properly filters forecast overrides to future months only, matching the behavior of Sections 1.9/1.10. This ensures MCR 002/003 EAC values are calculated consistently across all views.
+- Sections 1.4, 1.5, and 5.1 now auto-select the best populated Project MCR/Project No. plan column to avoid mis-grouping under `(blank)`.
+- Section 1.4 includes an additional cumulative line for Financial risks stacked over cumulative EAC.
+- Section 1.7 adds a Financial Risks Summary with KPIs and a project-level total table:
+  - Total risk amount
+  - Covered risk amount
+  - Uncovered risk amount
+  - Coverage ratio (%)
+  - Risk counts by status (fully covered / partially covered / uncovered)
+- Section 1.8 adds Pareto charts for Top 10 overspending and Top 10 underspending tasks, using Deviation = EAC (section 5.1 logic, excluding risks) - Plan, with Project MCR and Resource Group context.
+
+### Known Issues and Analysis
+
+**Section 1.5 vs Sections 1.9/1.10 Discrepancies (Investigated June 8, 2026)**
+
+Root cause: **Key mismatch in task aggregation logic**
+- Plan data has NO MCR column populated in the database
+- Section 1.9/1.10 builds task keys with blank MCR from plan data: `("org", "", "task_name")`
+- But actual transactions have MCRs (002, 003, 004, 005) from actuals data: `("org", "002", "task_name")`
+- When calculating future months, Section 1.9 cannot find task IDs for MCR-specific keys
+- Result: Section 1.9/1.10 fails to retrieve plan values for future months (only shows actuals)
+
+**Data Situation**:
+- Plan tasks: 79 (prj_mcr_number column empty)
+- Actuals: 442 records with MCRs (002=137, 003=53, 004=123, 005=129)
+- Task mappings: 0 entries (not currently used)
+
+**Impact**:
+- Section 1.5 correctly shows: Actuals (past) + Plan (future) + Overrides = Full EAC
+- Sections 1.9/1.10 incorrectly show: Only Actuals (missing plan for future months)
+- Discrepancies in displayed MCR totals between sections
+
+**Status**: Analysis complete. See `ANALYSIS_SECTIONS_1.5_VS_1.9_DISCREPANCIES.md` for detailed investigation and recommended fix.
+
+### 2. Project Management
 - Create, update, and delete projects.
 - Project metadata: name, description, start date, end date, status.
 
-### 2. Budget Planning
+### 3. Budget Planning
 - Task-based planning table with inline editing.
 - Required planning metadata:
   - Task Name
@@ -77,7 +120,7 @@ This application supports end-to-end project cost management:
 - Audit logging:
   - Tracks who changed what and when.
 
-### 3. Actuals Management
+### 4. Actuals Management
 - Manual entry of actual costs.
 - File import for:
   - Cost actuals
@@ -85,16 +128,29 @@ This application supports end-to-end project cost management:
 - Import profiles (column mapping templates).
 - Raw actual entry review.
 
-### 4. Labour Mapping
+### 5. Labour Mapping
 - Dedicated mapping tab for employee-to-task mapping.
 - Inline mapping table edit/delete workflow.
 - Mapping import support.
 - Auto-apply mapping to existing unmapped labour actuals.
 - Unmapped labour actuals visibility section.
 
-### 5. Forecast and Variance
+### 6. Forecast and Financial Risks
 - Estimate to Complete (ETC) by category.
-- EAC and variance views combining plan, actuals, and forecasts.
+- EAC views combining plan, actuals, forecast overrides, and financial risks.
+- 5.1 Estimated to complete adjustment now includes a dedicated **Financial risks** row in the pivot table totals.
+- 5.1 now includes mandatory **Adjustment Reasons** for task-level forecast overrides:
+  - Read-only `Adjustment Reason` column in the input and preview tables.
+  - `Adjustment Reasons` panel to capture and maintain reason text (+ optional category) per adjusted task.
+  - Save validation blocks plan override save when an adjusted task is missing a reason.
+- 5.2 Financial risks section with two grids:
+  - Risk register (one row per risk, computed status, monthly spread, remaining amount).
+  - Coverage mappings (one risk to many MCR/Task mappings with covered amounts).
+- Validation includes missing required fields, invalid month identified, and over-coverage checks.
+- Labour Actuals by Task and Month pivot table:
+  - Expandable task rows to drill down into employee-level breakdowns.
+  - **Expand All / Collapse All buttons** for quick navigation through large data sets.
+  - Filterable by task, project, resource group, year, and month.
 
 ## Technology Stack
 - Python

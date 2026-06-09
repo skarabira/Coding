@@ -8,6 +8,14 @@ import os
 DB_PATH = os.path.join(os.path.dirname(__file__), "budget_planner.db")
 
 
+def _norm_task_id(task_id):
+    """Normalize task_id for stable matching; MCR-level rows use 0."""
+    try:
+        return int(task_id or 0)
+    except Exception:
+        return 0
+
+
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -17,10 +25,11 @@ def get_conn():
 def get_forecast_override(project_id, task_id, mcr, month_year):
     """Get a specific override value, or None if it doesn't exist."""
     conn = get_conn()
+    task_id = _norm_task_id(task_id)
     row = conn.execute(
         """
         SELECT override_amount FROM forecast_overrides
-        WHERE project_id=? AND task_id=? AND mcr=? AND month_year=?
+        WHERE project_id=? AND COALESCE(task_id, 0)=? AND mcr=? AND month_year=?
         """,
         (project_id, task_id, mcr, month_year),
     ).fetchone()
@@ -31,16 +40,24 @@ def get_forecast_override(project_id, task_id, mcr, month_year):
 def upsert_forecast_override(project_id, task_id, mcr, month_year, override_amount):
     """Create or update a forecast override."""
     conn = get_conn()
+    task_id = _norm_task_id(task_id)
     try:
-        conn.execute(
+        _cur = conn.execute(
+            """
+            UPDATE forecast_overrides
+            SET override_amount=?, modified_at=datetime('now')
+            WHERE project_id=? AND COALESCE(task_id, 0)=? AND mcr=? AND month_year=?
+            """,
+            (override_amount, project_id, task_id, mcr, month_year),
+        )
+        if _cur.rowcount == 0:
+            conn.execute(
             """
             INSERT INTO forecast_overrides (project_id, task_id, mcr, month_year, override_amount)
             VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(project_id, task_id, mcr, month_year)
-            DO UPDATE SET override_amount=?, modified_at=datetime('now')
             """,
-            (project_id, task_id, mcr, month_year, override_amount, override_amount),
-        )
+                (project_id, task_id, mcr, month_year, override_amount),
+            )
         conn.commit()
     except Exception as e:
         print(f"Error upserting forecast override: {e}")
@@ -50,10 +67,11 @@ def upsert_forecast_override(project_id, task_id, mcr, month_year, override_amou
 def delete_forecast_override(project_id, task_id, mcr, month_year):
     """Delete a forecast override."""
     conn = get_conn()
+    task_id = _norm_task_id(task_id)
     conn.execute(
         """
         DELETE FROM forecast_overrides
-        WHERE project_id=? AND task_id=? AND mcr=? AND month_year=?
+        WHERE project_id=? AND COALESCE(task_id, 0)=? AND mcr=? AND month_year=?
         """,
         (project_id, task_id, mcr, month_year),
     )

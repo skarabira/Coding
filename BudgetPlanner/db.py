@@ -6,6 +6,7 @@ All SQLite operations live here.
 import sqlite3
 import os
 import json
+import datetime
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "budget_planner.db")
 
@@ -201,6 +202,31 @@ def init_db():
             UNIQUE(project_id, user_name, pref_key),
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
+
+        CREATE TABLE IF NOT EXISTS financial_risks (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id            INTEGER NOT NULL,
+            risk_name             TEXT NOT NULL,
+            total_initial_amount  REAL NOT NULL DEFAULT 0,
+            description           TEXT DEFAULT '',
+            month_identified_ym   TEXT NOT NULL,
+            created_at            TEXT DEFAULT (datetime('now')),
+            updated_at            TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS financial_risk_mappings (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id         INTEGER NOT NULL,
+            risk_id            INTEGER NOT NULL,
+            mapped_mcr         TEXT NOT NULL,
+            mapped_task_name   TEXT NOT NULL,
+            covered_amount     REAL NOT NULL DEFAULT 0,
+            created_at         TEXT DEFAULT (datetime('now')),
+            updated_at         TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY (risk_id) REFERENCES financial_risks(id) ON DELETE CASCADE
+        );
     """)
 
     # Lightweight migration for older DBs created before project_no existed.
@@ -275,8 +301,37 @@ def init_db():
             )
         """)
 
-    conn.commit()
-    conn.close()
+    # Migration: forecast_adjustment_reasons – task-level reasons for plan overrides.
+    far_exists = c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='forecast_adjustment_reasons'"
+    ).fetchone()
+    if not far_exists:
+        c.execute("""
+            CREATE TABLE forecast_adjustment_reasons (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id           INTEGER NOT NULL,
+                mcr                  TEXT NOT NULL,
+                task_id              INTEGER NOT NULL,
+                task_name_snapshot   TEXT NOT NULL DEFAULT '',
+                reason_category      TEXT NOT NULL DEFAULT '',
+                reason_text          TEXT NOT NULL DEFAULT '',
+                status               TEXT NOT NULL DEFAULT 'active',
+                created_at           TEXT DEFAULT (datetime('now')),
+                modified_at          TEXT DEFAULT (datetime('now')),
+                UNIQUE(project_id, mcr, task_id),
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )
+        """)
+
+    # Cache exact EAC totals displayed in section 5.1 so dashboard can consume the same value.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS section_5_1_eac_cache (
+            project_id    INTEGER PRIMARY KEY,
+            eac_value     REAL NOT NULL DEFAULT 0,
+            updated_at    TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+    """)
 
     conn.commit()
     conn.close()
@@ -864,6 +919,370 @@ def get_project_summary(project_id):
     return {"planned": planned, "actual": actual, "etc": etc, "eac": eac, "variance": variance}
 
 
+def get_project_eac_from_section_5_1(project_id):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) as total FROM actuals WHERE project_id=?",
+        (project_id,),
+    ).fetchone()
+    actual = float(row["total"] or 0.0) if row else 0.0
+    
+    etc_row = conn.execute(
+        "SELECT COALESCE(SUM(etc), 0) as total FROM forecasts WHERE project_id=?",
+        (project_id,),
+    ).fetchone()
+    etc = float(etc_row["total"] or 0.0) if etc_row else 0.0
+    
+    eac = actual + etc
+    conn.close()
+    return eac
+
+
+def set_section_5_1_eac_cache(project_id, eac_value):
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO section_5_1_eac_cache (project_id, eac_value, updated_at)
+        VALUES (?, ?, datetime('now'))
+        ON CONFLICT(project_id) DO UPDATE
+        SET eac_value=excluded.eac_value, updated_at=excluded.updated_at
+        """,
+        (project_id, float(eac_value or 0.0)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_section_5_1_eac_cache(project_id):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT eac_value FROM section_5_1_eac_cache WHERE project_id=?",
+        (project_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return float(row["eac_value"] or 0.0)
+
+
+def _round2(v):
+    return round(float(v or 0.0), 2)
+
+
+def _ym_from_any(v):
+    txt = str(v or "").strip()
+    if not txt:
+        return ""
+    try:
+        if len(txt) == 7 and txt[4] == "-":
+            datetime.date.fromisoformat(txt + "-01")
+            return txt
+    except Exception:
+        pass
+    for fmt in ("%b-%y", "%B-%y"):
+        try:
+            dt = datetime.datetime.strptime(txt, fmt)
+            return dt.strftime("%Y-%m")
+        except Exception:
+            continue
+    return ""
+
+
+def _project_months(project_id):
+    conn = get_conn()
+    project = conn.execute("SELECT start_date, end_date FROM projects WHERE id=?", (project_id,)).fetchone()
+    conn.close()
+    if not project:
+        return []
+    try:
+        fs = datetime.date.fromisoformat(project["start_date"] or "")
+        fe = datetime.date.fromisoformat(project["end_date"] or "")
+    except Exception:
+        fs = datetime.date.today().replace(day=1)
+        fe = fs
+    months = []
+    cur = fs.replace(day=1)
+    while cur <= fe.replace(day=1):
+        months.append(cur.strftime("%Y-%m"))
+        if cur.month == 12:
+            cur = cur.replace(year=cur.year + 1, month=1)
+        else:
+            cur = cur.replace(month=cur.month + 1)
+    return months
+
+
+def list_financial_risks(project_id):
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM financial_risks
+        WHERE project_id=?
+        ORDER BY month_identified_ym, id
+        """,
+        (project_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def create_financial_risk(project_id, risk_name, total_initial_amount, description, month_identified_ym):
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO financial_risks (project_id, risk_name, total_initial_amount, description, month_identified_ym, updated_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        """,
+        (
+            project_id,
+            str(risk_name or "").strip(),
+            _round2(total_initial_amount),
+            str(description or "").strip(),
+            _ym_from_any(month_identified_ym),
+        ),
+    )
+    rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+    conn.close()
+    return int(rid)
+
+
+def update_financial_risk(risk_id, risk_name, total_initial_amount, description, month_identified_ym):
+    conn = get_conn()
+    conn.execute(
+        """
+        UPDATE financial_risks
+        SET risk_name=?, total_initial_amount=?, description=?, month_identified_ym=?, updated_at=datetime('now')
+        WHERE id=?
+        """,
+        (
+            str(risk_name or "").strip(),
+            _round2(total_initial_amount),
+            str(description or "").strip(),
+            _ym_from_any(month_identified_ym),
+            risk_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_financial_risk(risk_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM financial_risks WHERE id=?", (risk_id,))
+    conn.commit()
+    conn.close()
+
+
+def list_financial_risk_mappings(project_id, risk_id=None):
+    conn = get_conn()
+    if risk_id is None:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM financial_risk_mappings
+            WHERE project_id=?
+            ORDER BY risk_id, id
+            """,
+            (project_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM financial_risk_mappings
+            WHERE project_id=? AND risk_id=?
+            ORDER BY id
+            """,
+            (project_id, risk_id),
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def create_financial_risk_mapping(project_id, risk_id, mapped_mcr, mapped_task_name, covered_amount):
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO financial_risk_mappings (project_id, risk_id, mapped_mcr, mapped_task_name, covered_amount, updated_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        """,
+        (
+            project_id,
+            int(risk_id),
+            str(mapped_mcr or "").strip(),
+            str(mapped_task_name or "").strip(),
+            _round2(covered_amount),
+        ),
+    )
+    mid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+    conn.close()
+    return int(mid)
+
+
+def update_financial_risk_mapping(mapping_id, mapped_mcr, mapped_task_name, covered_amount):
+    conn = get_conn()
+    conn.execute(
+        """
+        UPDATE financial_risk_mappings
+        SET mapped_mcr=?, mapped_task_name=?, covered_amount=?, updated_at=datetime('now')
+        WHERE id=?
+        """,
+        (
+            str(mapped_mcr or "").strip(),
+            str(mapped_task_name or "").strip(),
+            _round2(covered_amount),
+            mapping_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_financial_risk_mapping(mapping_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM financial_risk_mappings WHERE id=?", (mapping_id,))
+    conn.commit()
+    conn.close()
+
+
+def compute_project_financial_risk_monthly(project_id, months=None):
+    months = list(months) if months else _project_months(project_id)
+    month_set = set(months)
+    rows = list_financial_risks(project_id)
+    mappings = list_financial_risk_mappings(project_id)
+    by_risk = {}
+    for m in mappings:
+        by_risk.setdefault(int(m["risk_id"]), []).append(m)
+
+    project_start = months[0] if months else ""
+    project_end = months[-1] if months else ""
+
+    risk_rows = []
+    monthly_totals = {m: 0.0 for m in months}
+    errors = []
+
+    for r in rows:
+        rid = int(r["id"])
+        risk_name = str(r.get("risk_name") or "").strip()
+        initial = _round2(r.get("total_initial_amount", 0.0))
+        month_identified = _ym_from_any(r.get("month_identified_ym"))
+        mapping_rows = by_risk.get(rid, [])
+        covered = _round2(sum(_round2(m.get("covered_amount", 0.0)) for m in mapping_rows))
+        if covered > initial + 0.0001:
+            covered = initial
+        remaining = _round2(max(initial - covered, 0.0))
+
+        if abs(remaining - initial) < 0.005:
+            status = "uncovered"
+        elif remaining <= 0.004:
+            status = "fully covered"
+        else:
+            status = "partially covered"
+
+        source_amount = initial if status == "uncovered" else (remaining if status == "partially covered" else 0.0)
+
+        monthly_map = {m: 0.0 for m in months}
+        if source_amount > 0 and month_identified and months:
+            if month_identified > project_end:
+                errors.append(f"Risk '{risk_name}' has Month identified after project end.")
+            else:
+                spread_start = month_identified if month_identified >= project_start else project_start
+                spread_months = [m for m in months if m >= spread_start]
+                if spread_months:
+                    n = len(spread_months)
+                    base = _round2(source_amount / n)
+                    for m in spread_months[:-1]:
+                        monthly_map[m] = base
+                    monthly_map[spread_months[-1]] = _round2(source_amount - base * (n - 1))
+
+        for m in months:
+            monthly_totals[m] = _round2(monthly_totals.get(m, 0.0) + _round2(monthly_map.get(m, 0.0)))
+
+        risk_rows.append(
+            {
+                "id": rid,
+                "risk_name": risk_name,
+                "total_initial_amount": initial,
+                "description": str(r.get("description") or ""),
+                "month_identified_ym": month_identified,
+                "covered_amount": covered,
+                "remaining_amount": remaining,
+                "risk_status": status,
+                "monthly": monthly_map,
+            }
+        )
+
+    return {
+        "months": months,
+        "risk_rows": risk_rows,
+        "monthly_totals": monthly_totals,
+        "errors": errors,
+    }
+
+
+def get_plan_user_preference(project_id, user_name, pref_key, default=None):
+    conn = get_conn()
+    row = conn.execute(
+        """
+        SELECT pref_value
+        FROM plan_user_preferences
+        WHERE project_id=? AND user_name=? AND pref_key=?
+        """,
+        (project_id, (user_name or "").strip(), pref_key),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return default
+    try:
+        return json.loads(row["pref_value"])
+    except Exception:
+        return default
+
+
+def set_plan_user_preference(project_id, user_name, pref_key, pref_value):
+    user_name = (user_name or "").strip()
+    if not user_name:
+        return
+    payload = json.dumps(pref_value)
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO plan_user_preferences (project_id, user_name, pref_key, pref_value, updated_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(project_id, user_name, pref_key) DO UPDATE
+        SET pref_value=excluded.pref_value, updated_at=excluded.updated_at
+        """,
+        (project_id, user_name, pref_key, payload),
+    )
+    conn.commit()
+    conn.close()
+
+
+def create_plan_baseline(project_id, baseline_name, snapshot_json, created_by=""):
+    conn = get_conn()
+    existing = conn.execute(
+        "SELECT id FROM plan_baselines WHERE project_id=? AND baseline_name=?",
+        (project_id, baseline_name),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE plan_baselines SET snapshot_json=?, created_at=datetime('now'), created_by=? WHERE id=?",
+            (snapshot_json, created_by, existing["id"]),
+        )
+        result = "updated"
+    else:
+        conn.execute(
+            "INSERT INTO plan_baselines (project_id, baseline_name, snapshot_json, created_by) VALUES (?,?,?,?)",
+            (project_id, baseline_name, snapshot_json, created_by),
+        )
+        result = "created"
+    conn.commit()
+    conn.close()
+    return result
+
+
 # â”€â”€ Budget Plan Tasks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def get_plan_tasks(project_id, active_only=True):
@@ -1029,46 +1448,6 @@ def delete_plan_column(col_id):
     conn.close()
 
 
-def get_plan_user_preference(project_id, user_name, pref_key, default=None):
-    conn = get_conn()
-    row = conn.execute(
-        """
-        SELECT pref_value
-        FROM plan_user_preferences
-        WHERE project_id=? AND user_name=? AND pref_key=?
-        """,
-        (project_id, (user_name or "").strip(), pref_key),
-    ).fetchone()
-    conn.close()
-    if not row:
-        return default
-    try:
-        return json.loads(row["pref_value"])
-    except Exception:
-        return default
-
-
-def set_plan_user_preference(project_id, user_name, pref_key, pref_value):
-    user_name = (user_name or "").strip()
-    if not user_name:
-        return
-    payload = json.dumps(pref_value)
-    conn = get_conn()
-    conn.execute(
-        """
-        INSERT INTO plan_user_preferences (project_id, user_name, pref_key, pref_value, updated_at)
-        VALUES (?, ?, ?, ?, datetime('now'))
-        ON CONFLICT(project_id, user_name, pref_key) DO UPDATE
-        SET pref_value=excluded.pref_value, updated_at=excluded.updated_at
-        """,
-        (project_id, user_name, pref_key, payload),
-    )
-    conn.commit()
-    conn.close()
-
-
-# â”€â”€ Budget Plan Baselines â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 def get_plan_baselines(project_id):
     conn = get_conn()
     rows = conn.execute(
@@ -1077,29 +1456,6 @@ def get_plan_baselines(project_id):
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
-
-
-def create_plan_baseline(project_id, baseline_name, snapshot_json, created_by=""):
-    conn = get_conn()
-    existing = conn.execute(
-        "SELECT id FROM plan_baselines WHERE project_id=? AND baseline_name=?",
-        (project_id, baseline_name),
-    ).fetchone()
-    if existing:
-        conn.execute(
-            "UPDATE plan_baselines SET snapshot_json=?, created_at=datetime('now'), created_by=? WHERE id=?",
-            (snapshot_json, created_by, existing["id"]),
-        )
-        result = "updated"
-    else:
-        conn.execute(
-            "INSERT INTO plan_baselines (project_id, baseline_name, snapshot_json, created_by) VALUES (?,?,?,?)",
-            (project_id, baseline_name, snapshot_json, created_by),
-        )
-        result = "created"
-    conn.commit()
-    conn.close()
-    return result
 
 
 def get_plan_baseline(project_id, baseline_name):
