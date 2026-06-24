@@ -31,14 +31,14 @@ st.sidebar.title("💰 Budget Management Assistant")
 st.sidebar.markdown("---")
 page = st.sidebar.radio(
     "Navigate",
-    ["🏠 1. Dashboard", "📁 2. Projects", "📋 3. Budget Planning", "📥 4. Actuals", "🔮 5. Manual Forecast Adjustment", "⚠️ 6. Financial risk", "🔗 7. Task Mappings", "📤 8. Export", "🧭 9. Operating Guide"],
+    ["🏠 Dashboard", "📁 Projects", "📋 Budget Planning", "📥 Actuals", "🔮 Forecast", "🔗 Task Mappings", "📤 Export"],
 )
 
 # Helper: project selector shown on most pages
 def select_project(label="Select project", state_key="selected_project_name"):
     projects = db.get_projects()
     if not projects:
-        st.warning("No projects yet. Go to **📁 2. Projects** to create one.")
+        st.warning("No projects yet. Go to **📁 Projects** to create one.")
         return None, None
     names = [p["name"] for p in projects]
 
@@ -186,6 +186,7 @@ def _is_project_mcr_like_column(col_meta):
         or ("project" in norm_label and "number" in norm_label)
         or norm_key.endswith("project no")
         or norm_label.endswith("project no")
+        or ("project" in norm_key and "mcr" in norm_key)
         or ("project" in norm_label and "mcr" in norm_label)
     )
 
@@ -283,14 +284,14 @@ def render_table_view(df, key_prefix, filter_columns=None, total_columns=None, s
 # ════════════════════════════════════════════════════════════════════════════
 # 1. DASHBOARD
 # ════════════════════════════════════════════════════════════════════════════
-if page == "🏠 1. Dashboard":
+if page == "🏠 Dashboard":
     st.title("🏠 1. Dashboard")
     st.caption("Reference: 1.1 Project Summary | 1.2 Budget vs Actuals vs EAC | 1.3 Monthly Actuals vs. Plan | 1.4 Plan vs Actual by Project No. | 1.5 Actuals by Project MCR | 1.6 Cross-check Task Names | 1.7 Financial Risks Summary | 1.8 Task Deviation Pareto | 1.9 Plan vs. Actuals by Organization | 1.10 Plan vs. Actuals by Task")
     st.markdown("Overview by project and by month, with Labour vs Other split.")
 
     projects = db.get_projects()
     if not projects:
-        st.info("No projects yet. Head to **📁 2. Projects** to get started.")
+        st.info("No projects yet. Head to **📁 Projects** to get started.")
     else:
         _all_project_names = [p["name"] for p in projects]
         _default_dash_projects = [
@@ -1576,7 +1577,6 @@ if page == "🏠 1. Dashboard":
         st.markdown("---")
         with st.expander("⚠️ 1.7 Financial Risks Summary", expanded=False):
             _risk_summary_rows = []
-            _risk_detail_rows = []
             for _p in projects:
                 try:
                     _rs = datetime.date.fromisoformat(_p.get("start_date") or "")
@@ -1604,22 +1604,6 @@ if page == "🏠 1. Dashboard":
                 _fully = sum(1 for _r in _risk_rows if str(_r.get("risk_status") or "") == "fully covered")
                 _partial = sum(1 for _r in _risk_rows if str(_r.get("risk_status") or "") == "partially covered")
                 _uncovered = sum(1 for _r in _risk_rows if str(_r.get("risk_status") or "") == "uncovered")
-
-                for _r in _risk_rows:
-                    _r_initial = float(_r.get("total_initial_amount") or 0.0)
-                    _r_remaining = float(_r.get("remaining_amount") or 0.0)
-                    _r_covered = float(max(0.0, _r_initial - _r_remaining))
-                    _r_cov_pct = (_r_covered / _r_initial * 100.0) if _r_initial > 0 else 0.0
-                    _risk_detail_rows.append(
-                        {
-                            "Project": _p.get("name") or "",
-                            "Financial risk": str(_r.get("risk_name") or "").strip() or f"Risk #{int(_r.get('id') or 0)}",
-                            "Total risk (€)": _r_initial,
-                            "Covered risk (€)": _r_covered,
-                            "Remaining risk (€)": _r_remaining,
-                            "Coverage (%)": _r_cov_pct,
-                        }
-                    )
 
                 _risk_summary_rows.append(
                     {
@@ -1654,48 +1638,6 @@ if page == "🏠 1. Dashboard":
             if _risk_total_count == 0:
                 st.info("No financial risks registered yet.")
             else:
-                _wf_fig = go.Figure(
-                    go.Waterfall(
-                        name="Financial risk",
-                        measure=["absolute", "relative", "total"],
-                        x=["Total initial risk", "Covered", "Remaining risk"],
-                        y=[_risk_total_initial, -_risk_total_covered, _risk_total_uncovered],
-                        connector={"line": {"color": "rgba(120,120,120,0.4)"}},
-                    )
-                )
-                _wf_fig.update_layout(
-                    title="Financial Risk Exposure Overview",
-                    showlegend=False,
-                    height=320,
-                    margin={"l": 20, "r": 20, "t": 55, "b": 20},
-                )
-                st.plotly_chart(_wf_fig, use_container_width=True)
-
-                _top_risk_df = pd.DataFrame(_risk_detail_rows)
-                _top_risk_df = _top_risk_df[_top_risk_df["Remaining risk (€)"] > 0].copy()
-                if not _top_risk_df.empty:
-                    _top_risk_df["Risk"] = _top_risk_df.apply(
-                        lambda _r: f"{_r['Financial risk']} ({_r['Project']})",
-                        axis=1,
-                    )
-                    _top_risk_df = _top_risk_df.sort_values("Remaining risk (€)", ascending=False).head(10)
-                    _top_bar = px.bar(
-                        _top_risk_df,
-                        x="Remaining risk (€)",
-                        y="Risk",
-                        orientation="h",
-                        title="Top Remaining Financial Risks",
-                        text="Remaining risk (€)",
-                        color="Project",
-                    )
-                    _top_bar.update_traces(texttemplate="€ %{x:,.0f}", textposition="outside", cliponaxis=False)
-                    _top_bar.update_layout(
-                        yaxis={"categoryorder": "total ascending"},
-                        height=420,
-                        margin={"l": 20, "r": 20, "t": 55, "b": 20},
-                    )
-                    st.plotly_chart(_top_bar, use_container_width=True)
-
                 _risk_total_row = {
                     "Project": "TOTAL",
                     "Risks": _risk_total_count,
@@ -3148,7 +3090,7 @@ if page == "🏠 1. Dashboard":
 # ════════════════════════════════════════════════════════════════════════════
 # 2. PROJECTS
 # ════════════════════════════════════════════════════════════════════════════
-elif page == "📁 2. Projects":
+elif page == "📁 Projects":
     st.title("📁 2. Projects")
     st.caption("Reference: 2.1 Add New Project | 2.2 Edit Existing Projects")
 
@@ -3208,7 +3150,7 @@ elif page == "📁 2. Projects":
 # ════════════════════════════════════════════════════════════════════════════
 # 3. BUDGET PLANNING
 # ════════════════════════════════════════════════════════════════════════════
-elif page == "📋 3. Budget Planning":
+elif page == "📋 Budget Planning":
     st.title("📋 3. Budget Planning")
     st.caption("Reference: 3.1 Plan | 3.2 Import from Excel | 3.3 Baselines | 3.4 Columns | 3.5 Audit Log")
     project_id, project = select_project()
@@ -4821,7 +4763,7 @@ elif page == "📋 3. Budget Planning":
 # ════════════════════════════════════════════════════════════════════════════
 # 4. ACTUALS
 # ════════════════════════════════════════════════════════════════════════════
-elif page == "📥 4. Actuals":
+elif page == "📥 Actuals":
     st.title("📥 4. Actuals Entry")
     st.caption("Reference: 4.1 Manual Entry | 4.2 Import | 4.3 Mapping | 4.4 View Actuals")
     project_id, project = select_project()
@@ -5056,63 +4998,6 @@ elif page == "📥 4. Actuals":
                         st.rerun()
                 except Exception as e:
                     st.error(f"Cost import error: {e}")
-
-            st.markdown("---")
-            with st.expander("4.2.1.1 Raw other cost actual entries"):
-                _cost_actuals = db.get_actuals(project_id)
-                _cost_actuals = [
-                    r for r in _cost_actuals
-                    if str(r.get("source") or "") == "MCR Import (Cost)"
-                ]
-                if not _cost_actuals:
-                    st.info("No imported other cost actual entries yet.")
-                else:
-                    _cost_raw_df = pd.DataFrame(_cost_actuals)
-                    _cost_raw_cols = [
-                        c for c in [
-                            "date",
-                            "category",
-                            "task_name",
-                            "resource_group",
-                            "project_no",
-                            "wbs_number",
-                            "financial_document",
-                            "financial_document_posting_date",
-                            "description",
-                            "amount",
-                            "source",
-                            "import_file",
-                        ]
-                        if c in _cost_raw_df.columns
-                    ]
-                    _cost_display = _cost_raw_df[_cost_raw_cols].rename(columns={
-                        "date": "Date",
-                        "category": "Category",
-                        "task_name": "Task Name",
-                        "resource_group": "Resource Group",
-                        "project_no": "Project no.",
-                        "wbs_number": "WBS Number",
-                        "financial_document": "Financial document",
-                        "financial_document_posting_date": "Financial document posting date",
-                        "description": "Description",
-                        "amount": "Amount (€)",
-                        "source": "Source",
-                        "import_file": "Import File",
-                    })
-                    _cost_filter_cols = [
-                        c for c in ["Category", "Task Name", "Resource Group", "Project no.", "Source", "Import File"]
-                        if c in _cost_display.columns
-                    ]
-                    _cost_total_cols = [c for c in ["Amount (€)"] if c in _cost_display.columns]
-                    render_table_view(
-                        _cost_display,
-                        key_prefix="actuals_cost_raw_entries",
-                        filter_columns=_cost_filter_cols,
-                        total_columns=_cost_total_cols,
-                        show_totals=True,
-                        hide_index=True,
-                        currency_columns=_cost_total_cols,
-                    )
 
         with import_labour_tab:
             st.markdown("Upload labour actuals file. This flow uses employee/resource-group/project mapping to derive task/description.")
@@ -6479,11 +6364,11 @@ elif page == "📥 4. Actuals":
                     st.rerun()
 
 # ════════════════════════════════════════════════════════════════════════════
-# 5. MANUAL FORECAST ADJUSTMENT
+# 5. FORECAST
 # ════════════════════════════════════════════════════════════════════════════
-elif page == "🔮 5. Manual Forecast Adjustment":
-    st.title("🔮 5. Manual Forecast Adjustment")
-    st.caption("Reference: 5.1 Estimated to complete adjustment")
+elif page == "🔮 Forecast":
+    st.title("🔮 5. Forecast (Estimate to Complete)")
+    st.caption("Reference: 5.1 Estimated to complete adjustment | 5.2 Financial risks")
     project_id, project = select_project()
     if not project_id:
         st.stop()
@@ -6820,6 +6705,30 @@ elif page == "🔮 5. Manual Forecast Adjustment":
                     _pivot_df["__task_id"] = None
                 _pivot_df = _pivot_df[_col_headers + ["__mcr_key", "__task_id"]]
 
+                # Create indicator row showing Actual vs Plan for each month
+                _indicator_row = {
+                    "Project MCR #": "Data Type",
+                    "Task Name": "",
+                    "RG type": "",
+                    "Resource group": "",
+                }
+                for _m in _months:
+                    if _m < _current_ym:
+                        _indicator_row[_m] = "📊 Actual"
+                    else:
+                        _indicator_row[_m] = "📈 Plan"
+                _indicator_row["Estimated at Completion (EAC)"] = ""
+                _indicator_row["Total Plan"] = ""
+                _indicator_row["Δ vs Total Plan"] = ""
+
+                # Keep indicator row separate from the editor to avoid mixed dtypes in month columns.
+                _indicator_df = pd.DataFrame([_indicator_row])[_col_headers]
+                st.dataframe(
+                    _indicator_df,
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
                 # Load existing overrides and build override lookup
                 import db_forecast_overrides
                 import db_adjustment_reasons
@@ -7091,41 +7000,17 @@ elif page == "🔮 5. Manual Forecast Adjustment":
                 _editor_df = _recompute_live_metrics(_editor_df)
 
                 st.write("**Modify Plan Values for Future Months (Cells with orange background were modified):**")
-                st.markdown(
-                    """
-                    <div style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap; margin:0.15rem 0 0.6rem 0; font-size:0.9rem;">
-                        <span>🔵 Actuals months, read-only</span>
-                        <span>🟢 Plan months, editable</span>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
                 _currency_cols = _months + ["Estimated at Completion (EAC)", "Total Plan", "Δ vs Total Plan"]
 
                 # Build column config: currency format for numeric cols, text for Adjustment Reason
-                _col_config = {}
-                for c in _currency_cols:
-                    if c in _months:
-                        _month_label = f"{'🔵' if c < _current_ym else '🟢'} {c}"
-                        _col_config[c] = st.column_config.NumberColumn(_month_label, format="€ %,.0f")
-                    else:
-                        _col_config[c] = st.column_config.NumberColumn(c, format="€ %,.0f")
+                _col_config = {c: st.column_config.NumberColumn(format="€ %,.0f") for c in _currency_cols}
                 _col_config["Adjustment Reason"] = st.column_config.TextColumn(
                     "Adjustment Reason", help="Reason for adjusting this task's plan values"
                 )
 
-                def _forecast_month_style(_df):
-                    _styles = pd.DataFrame("", index=_df.index, columns=_df.columns)
-                    for _m in _months:
-                        if _m in _styles.columns:
-                            _styles[_m] = "background-color: #e7f1ff" if _m < _current_ym else "background-color: #e9f7ef"
-                    return _styles
-
-                _editor_display = _editor_df.style.apply(_forecast_month_style, axis=None)
-
                 # Display editable dataframe
                 _edited_df = st.data_editor(
-                    _editor_display,
+                    _editor_df,
                     hide_index=True,
                     use_container_width=True,
                     disabled=_readonly_cols,  # Only plan months are editable
@@ -7473,400 +7358,285 @@ elif page == "🔮 5. Manual Forecast Adjustment":
                 )
                 st.dataframe(_styled_preview, hide_index=True, use_container_width=True)
 
-    st.warning(
-        "**Financial risk management has moved to the main page.** Open **⚠️ 6. Financial risk** from the sidebar to register risks and coverage mappings."
-    )
-
-# ════════════════════════════════════════════════════════════════════════════
-elif page == "⚠️ 6. Financial risk":
-    st.title("⚠️ 6. Financial risk")
-    st.caption("Reference: 6.1 Risk register | 6.2 Coverage mappings")
-    project_id, project = select_project()
-    if not project_id:
-        st.stop()
-
-    st.caption(
-        "Register and manage project-level financial risks not yet planned in task-level budget. "
-        "Residual (uncovered) risk is distributed monthly and consumed in Forecast 5.1 as a dedicated row."
-    )
-    st.markdown(
-        """
-        <style>
-        button[aria-label="Delete risk"],
-        button[aria-label="Delete mapping"] {
-            background-color: #c62828 !important;
-            color: #ffffff !important;
-            border: 1px solid #8e1b1b !important;
-        }
-        button[aria-label="Delete risk"]:hover,
-        button[aria-label="Delete mapping"]:hover {
-            background-color: #b71c1c !important;
-            border-color: #7f1313 !important;
-        }
-        button[aria-label="Delete risk"]:focus,
-        button[aria-label="Delete mapping"]:focus {
-            box-shadow: 0 0 0 0.2rem rgba(198, 40, 40, 0.35) !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    try:
-        _fr_start = datetime.date.fromisoformat(project.get("start_date") or "")
-        _fr_end = datetime.date.fromisoformat(project.get("end_date") or "")
-    except Exception:
-        _fr_start = datetime.date.today().replace(day=1)
-        _fr_end = _fr_start
-
-    _fr_months = []
-    _fr_cur = _fr_start.replace(day=1)
-    while _fr_cur <= _fr_end.replace(day=1):
-        _fr_months.append(_fr_cur.strftime("%Y-%m"))
-        if _fr_cur.month == 12:
-            _fr_cur = _fr_cur.replace(year=_fr_cur.year + 1, month=1)
-        else:
-            _fr_cur = _fr_cur.replace(month=_fr_cur.month + 1)
-
-    def _fr_fmt_ym(_ym):
-        _s = str(_ym or "").strip()
-        if len(_s) == 7 and _s[4] == "-":
-            try:
-                return datetime.datetime.strptime(_s, "%Y-%m").strftime("%b-%y")
-            except Exception:
-                return _s
-        return _s
-
-    def _fr_parse_month_input(_txt):
-        _v = str(_txt or "").strip()
-        if not _v:
-            return ""
-        if len(_v) == 7 and _v[4] == "-":
-            try:
-                datetime.datetime.strptime(_v, "%Y-%m")
-                return _v
-            except Exception:
-                return ""
-        for _fmt in ("%b-%y", "%B-%y"):
-            try:
-                return datetime.datetime.strptime(_v, _fmt).strftime("%Y-%m")
-            except Exception:
-                continue
-        return ""
-
-    _fr_rows_raw = db.list_financial_risks(project_id)
-    _fr_map_rows = db.list_financial_risk_mappings(project_id)
-    _fr_bundle = db.compute_project_financial_risk_monthly(project_id, _fr_months)
-    if _fr_bundle.get("errors"):
-        st.warning("Validation: " + " | ".join(_fr_bundle.get("errors", [])))
-
-    st.markdown("**6.1 Financial risk register**")
-    _risk_options = {"(new)": None}
-    for _r in _fr_rows_raw:
-        _risk_options[f"[{_r['id']}] {_r.get('risk_name') or ''}"] = int(_r["id"])
-    _risk_pick_label = st.selectbox(
-        "Select risk to edit",
-        list(_risk_options.keys()),
-        key=f"fr_risk_pick_{project_id}",
-    )
-    _risk_pick_id = _risk_options[_risk_pick_label]
-    _risk_existing = next((r for r in _fr_rows_raw if int(r["id"]) == int(_risk_pick_id)), None) if _risk_pick_id else None
-
-    with st.form(key=f"fr_risk_form_{project_id}"):
-        _fr_c1, _fr_c2 = st.columns([2, 1])
-        _risk_name = _fr_c1.text_input("Financial risk (name)", value=str((_risk_existing or {}).get("risk_name") or ""))
-        _risk_amount = _fr_c2.number_input(
-            "Total Initial Amount (€)",
-            min_value=0.0,
-            step=0.01,
-            format="%.2f",
-            value=float((_risk_existing or {}).get("total_initial_amount") or 0.0),
+    with st.expander("⚠️ 5.2 Financial risks", expanded=True):
+        st.caption(
+            "Register and manage project-level financial risks not yet planned in task-level budget. "
+            "Residual (uncovered) risk is distributed monthly and included in section 5.1 as a dedicated row."
         )
-        _risk_desc = st.text_area("Description", value=str((_risk_existing or {}).get("description") or ""), height=80)
-        _risk_month_display = st.text_input(
-            "Month identified (MMM-YY)",
-            value=_fr_fmt_ym((_risk_existing or {}).get("month_identified_ym") or ""),
-            placeholder="Jan-26",
+        st.markdown(
+            """
+            <style>
+            button[aria-label="Delete risk"],
+            button[aria-label="Delete mapping"] {
+                background-color: #c62828 !important;
+                color: #ffffff !important;
+                border: 1px solid #8e1b1b !important;
+            }
+            button[aria-label="Delete risk"]:hover,
+            button[aria-label="Delete mapping"]:hover {
+                background-color: #b71c1c !important;
+                border-color: #7f1313 !important;
+            }
+            button[aria-label="Delete risk"]:focus,
+            button[aria-label="Delete mapping"]:focus {
+                box-shadow: 0 0 0 0.2rem rgba(198, 40, 40, 0.35) !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
         )
 
-        _save_risk = st.form_submit_button("Save risk")
-        if _save_risk:
-            _errors = []
-            _risk_name_s = str(_risk_name or "").strip()
-            _risk_ym = _fr_parse_month_input(_risk_month_display)
-            if not _risk_name_s:
-                _errors.append("Financial risk (name) is required.")
-            if float(_risk_amount or 0.0) <= 0:
-                _errors.append("Total Initial Amount must be greater than 0.")
-            if not _risk_ym:
-                _errors.append("Month identified must be a valid MMM-YY (example Jan-26).")
-            elif _fr_months and _risk_ym > _fr_months[-1]:
-                _errors.append("Month identified cannot be after project end month.")
-            if _errors:
-                st.error(" ".join(_errors))
+        try:
+            _fr_start = datetime.date.fromisoformat(project.get("start_date") or "")
+            _fr_end = datetime.date.fromisoformat(project.get("end_date") or "")
+        except Exception:
+            _fr_start = datetime.date.today().replace(day=1)
+            _fr_end = _fr_start
+
+        _fr_months = []
+        _fr_cur = _fr_start.replace(day=1)
+        while _fr_cur <= _fr_end.replace(day=1):
+            _fr_months.append(_fr_cur.strftime("%Y-%m"))
+            if _fr_cur.month == 12:
+                _fr_cur = _fr_cur.replace(year=_fr_cur.year + 1, month=1)
             else:
-                if _risk_existing:
-                    db.update_financial_risk(_risk_existing["id"], _risk_name_s, _risk_amount, _risk_desc, _risk_ym)
-                    st.success("Financial risk updated.")
-                else:
-                    db.create_financial_risk(project_id, _risk_name_s, _risk_amount, _risk_desc, _risk_ym)
-                    st.success("Financial risk created.")
-                st.rerun()
+                _fr_cur = _fr_cur.replace(month=_fr_cur.month + 1)
 
-    _fr_table_rows = []
-    for _rr in _fr_bundle.get("risk_rows", []):
-        _total_initial_amount = float(_rr.get("total_initial_amount") or 0.0)
-        _remaining_amount = float(_rr.get("remaining_amount") or 0.0)
-        _row = {
-            "Financial risk": _rr.get("risk_name") or "",
-            "Description": _rr.get("description") or "",
-            "Total Initial Amount": _total_initial_amount,
-            "Month identified": _fr_fmt_ym(_rr.get("month_identified_ym") or ""),
-            "Risk status": _rr.get("risk_status") or "",
-            "Total covered amount": max(0.0, _total_initial_amount - _remaining_amount),
-        }
-        for _m in _fr_months:
-            _row[_m] = float((_rr.get("monthly") or {}).get(_m, 0.0) or 0.0)
-        _row["Remaining risk amount (Total)"] = _remaining_amount
-        _fr_table_rows.append(_row)
+        def _fr_fmt_ym(_ym):
+            _s = str(_ym or "").strip()
+            if len(_s) == 7 and _s[4] == "-":
+                try:
+                    return datetime.datetime.strptime(_s, "%Y-%m").strftime("%b-%y")
+                except Exception:
+                    return _s
+            return _s
 
-    _show_fr_month_cols = st.toggle(
-        "Show monthly columns in risk summary",
-        value=False,
-        key=f"fr_show_month_cols_{project_id}",
-    )
+        def _fr_parse_month_input(_txt):
+            _v = str(_txt or "").strip()
+            if not _v:
+                return ""
+            if len(_v) == 7 and _v[4] == "-":
+                try:
+                    datetime.datetime.strptime(_v, "%Y-%m")
+                    return _v
+                except Exception:
+                    return ""
+            for _fmt in ("%b-%y", "%B-%y"):
+                try:
+                    return datetime.datetime.strptime(_v, _fmt).strftime("%Y-%m")
+                except Exception:
+                    continue
+            return ""
 
-    if _fr_table_rows:
-        _fr_df = pd.DataFrame(_fr_table_rows)
-        _fr_month_cols = [m for m in _fr_months if m in _fr_df.columns]
-        _fr_base_cols = [
-            "Financial risk",
-            "Description",
-            "Total Initial Amount",
-            "Month identified",
-            "Risk status",
-            "Total covered amount",
-            "Remaining risk amount (Total)",
-        ]
-        _fr_display_cols = _fr_base_cols + (_fr_month_cols if _show_fr_month_cols else [])
-        _fr_df_view = _fr_df[_fr_display_cols].copy()
-        _fr_currency_cols = ["Total Initial Amount", "Total covered amount", "Remaining risk amount (Total)"]
-        if _show_fr_month_cols:
-            _fr_currency_cols += _fr_month_cols
+        _fr_rows_raw = db.list_financial_risks(project_id)
+        _fr_map_rows = db.list_financial_risk_mappings(project_id)
+        _fr_bundle = db.compute_project_financial_risk_monthly(project_id, _fr_months)
+        if _fr_bundle.get("errors"):
+            st.warning("Validation: " + " | ".join(_fr_bundle.get("errors", [])))
 
-        _fr_total_row = {c: "" for c in _fr_display_cols}
-        _fr_total_row["Financial risk"] = "TOTAL"
-        for _c in _fr_currency_cols:
-            _fr_total_row[_c] = _fr_df_view[_c].sum() if _c in _fr_df_view.columns else 0.0
-        _fr_df_with_total = pd.concat([_fr_df_view, pd.DataFrame([_fr_total_row])], ignore_index=True)
-        st.dataframe(
-            _fr_df_with_total,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                c: st.column_config.NumberColumn(format="€ %,.2f")
-                for c in _fr_currency_cols
-            },
+        st.markdown("**5.2.1 Risk register**")
+        _risk_options = {"(new)": None}
+        for _r in _fr_rows_raw:
+            _risk_options[f"[{_r['id']}] {_r.get('risk_name') or ''}"] = int(_r["id"])
+        _risk_pick_label = st.selectbox(
+            "Select risk to edit",
+            list(_risk_options.keys()),
+            key=f"fr_risk_pick_{project_id}",
         )
-    else:
-        st.info("No financial risks yet.")
+        _risk_pick_id = _risk_options[_risk_pick_label]
+        _risk_existing = next((r for r in _fr_rows_raw if int(r["id"]) == int(_risk_pick_id)), None) if _risk_pick_id else None
 
-    if _fr_rows_raw:
-        _del_risk_options = {f"[{r['id']}] {r.get('risk_name') or ''}": int(r["id"]) for r in _fr_rows_raw}
-        _dr_c1, _dr_c2 = st.columns([4, 1])
-        _del_risk_pick = _dr_c1.selectbox("Delete risk", list(_del_risk_options.keys()), key=f"fr_del_risk_pick_{project_id}")
-        _dr_c2.write("")
-        _dr_c2.write("")
-        if _dr_c2.button("Delete risk", key=f"fr_del_risk_btn_{project_id}"):
-            db.delete_financial_risk(_del_risk_options[_del_risk_pick])
-            st.success("Financial risk deleted.")
-            st.rerun()
+        with st.form(key=f"fr_risk_form_{project_id}"):
+            _fr_c1, _fr_c2 = st.columns([2, 1])
+            _risk_name = _fr_c1.text_input("Financial risk (name)", value=str((_risk_existing or {}).get("risk_name") or ""))
+            _risk_amount = _fr_c2.number_input(
+                "Total Initial Amount (€)",
+                min_value=0.0,
+                step=0.01,
+                format="%.2f",
+                value=float((_risk_existing or {}).get("total_initial_amount") or 0.0),
+            )
+            _risk_desc = st.text_area("Description", value=str((_risk_existing or {}).get("description") or ""), height=80)
+            _risk_month_display = st.text_input(
+                "Month identified (MMM-YY)",
+                value=_fr_fmt_ym((_risk_existing or {}).get("month_identified_ym") or ""),
+                placeholder="Jan-26",
+            )
 
-    st.markdown("**6.2 Financial risk mitigation**")
-    st.info(
-        "Use this section to link one financial risk to one or more mitigation lines. A single risk can be mitigated by multiple MCR/Task lines. "
-        "A financial risk is considered mitigated when part or all of the risk amount is planned as a Task in an MCR project. "
-        "MCR projects are approved and released for charging buckets, so they are the planned capacity where mitigation is assigned."
-    )
-    if not _fr_rows_raw:
-        st.info("Create at least one financial risk first.")
-    else:
-        _fr_name_by_id = {int(r["id"]): str(r.get("risk_name") or "") for r in _fr_rows_raw}
-        _map_risk_options = {f"[{r['id']}] {r.get('risk_name') or ''}": int(r["id"]) for r in _fr_rows_raw}
-        _map_risk_label = st.selectbox("Mitigate risk", list(_map_risk_options.keys()), key=f"fr_map_risk_{project_id}")
-        _map_risk_id = _map_risk_options[_map_risk_label]
-        _map_risk_row = next((r for r in _fr_rows_raw if int(r["id"]) == int(_map_risk_id)), None)
-        _map_existing = [m for m in _fr_map_rows if int(m.get("risk_id") or 0) == int(_map_risk_id)]
-
-        with st.form(key=f"fr_map_form_{project_id}"):
-            _fm_c1, _fm_c2, _fm_c3 = st.columns([2, 2, 1])
-            _map_mcr = _fm_c1.text_input("Mapping to MCR Project No.", value="")
-            _map_task = _fm_c2.text_input("Mapping to Task", value="")
-            _map_amount = _fm_c3.number_input("Covered amount (€)", min_value=0.0, step=0.01, format="%.2f", value=0.0)
-            _save_map = st.form_submit_button("Add mapping")
-            if _save_map:
+            _save_risk = st.form_submit_button("Save risk")
+            if _save_risk:
                 _errors = []
-                _mcr = str(_map_mcr or "").strip()
-                _task = str(_map_task or "").strip()
-                _covered = round(float(_map_amount or 0.0), 2)
-                if not _mcr:
-                    _errors.append("Mapping to MCR Project No. is required.")
-                if not _task:
-                    _errors.append("Mapping to Task is required.")
-                if _covered <= 0:
-                    _errors.append("Covered amount must be greater than 0.")
-
-                _initial = round(float((_map_risk_row or {}).get("total_initial_amount") or 0.0), 2)
-                _already = round(sum(float(m.get("covered_amount") or 0.0) for m in _map_existing), 2)
-                if _already + _covered > _initial + 0.0001:
-                    _errors.append("Total covered amount cannot exceed Total Initial Amount.")
-
+                _risk_name_s = str(_risk_name or "").strip()
+                _risk_ym = _fr_parse_month_input(_risk_month_display)
+                if not _risk_name_s:
+                    _errors.append("Financial risk (name) is required.")
+                if float(_risk_amount or 0.0) <= 0:
+                    _errors.append("Total Initial Amount must be greater than 0.")
+                if not _risk_ym:
+                    _errors.append("Month identified must be a valid MMM-YY (example Jan-26).")
+                elif _fr_months and _risk_ym > _fr_months[-1]:
+                    _errors.append("Month identified cannot be after project end month.")
                 if _errors:
                     st.error(" ".join(_errors))
                 else:
-                    db.create_financial_risk_mapping(project_id, _map_risk_id, _mcr, _task, _covered)
-                    st.success("Mapping added.")
+                    if _risk_existing:
+                        db.update_financial_risk(_risk_existing["id"], _risk_name_s, _risk_amount, _risk_desc, _risk_ym)
+                        st.success("Financial risk updated.")
+                    else:
+                        db.create_financial_risk(project_id, _risk_name_s, _risk_amount, _risk_desc, _risk_ym)
+                        st.success("Financial risk created.")
                     st.rerun()
 
-        st.markdown("All risk mitigations")
-        _risk_expand_key = f"fr_mitigation_expanded_{project_id}"
-        if _risk_expand_key not in st.session_state:
-            st.session_state[_risk_expand_key] = {}
-
-        _risk_ids = [int(r.get("id") or 0) for r in _fr_rows_raw]
-        if _risk_ids:
-            _ex_c1, _ex_c2, _ex_c3, _ex_c4 = st.columns([3, 1, 1, 1])
-            _risk_toggle_options = {
-                f"[{int(r.get('id') or 0)}] {r.get('risk_name') or ''}": int(r.get("id") or 0)
-                for r in _fr_rows_raw
-            }
-            _toggle_label = _ex_c1.selectbox(
-                "Risk drill-down",
-                list(_risk_toggle_options.keys()),
-                key=f"{_risk_expand_key}__pick",
-            )
-            if _ex_c2.button("Toggle", key=f"{_risk_expand_key}__toggle"):
-                _rid = _risk_toggle_options[_toggle_label]
-                _expanded = dict(st.session_state[_risk_expand_key])
-                _expanded[_rid] = not bool(_expanded.get(_rid, False))
-                st.session_state[_risk_expand_key] = _expanded
-                st.rerun()
-            if _ex_c3.button("Expand All", key=f"{_risk_expand_key}__expand_all"):
-                st.session_state[_risk_expand_key] = {rid: True for rid in _risk_ids}
-                st.rerun()
-            if _ex_c4.button("Collapse All", key=f"{_risk_expand_key}__collapse_all"):
-                st.session_state[_risk_expand_key] = {}
-                st.rerun()
-
-        _maps_by_risk = {}
-        for m in _fr_map_rows:
-            _maps_by_risk.setdefault(int(m.get("risk_id") or 0), []).append(m)
-
-        _mitigation_rows = []
-        _risk_initial_total = 0.0
-        _risk_covered_total = 0.0
-        _risk_remaining_total = 0.0
+        _fr_table_rows = []
         for _rr in _fr_bundle.get("risk_rows", []):
-            _rid = int(_rr.get("id") or 0)
-            _initial = float(_rr.get("total_initial_amount") or 0.0)
-            _remaining = float(_rr.get("remaining_amount") or 0.0)
-            _covered = max(0.0, _initial - _remaining)
-            _risk_initial_total += _initial
-            _risk_covered_total += _covered
-            _risk_remaining_total += _remaining
-            _is_expanded = bool(st.session_state[_risk_expand_key].get(_rid, False))
-            _risk_name = str(_rr.get("risk_name") or "").strip() or f"Risk #{_rid}"
-            _risk_mappings = _maps_by_risk.get(_rid, [])
-            _prefix = "▼" if _is_expanded and _risk_mappings else ("▶" if _risk_mappings else "")
-            _risk_label = f"{_prefix} {_risk_name}".strip()
-            _risk_status_raw = str(_rr.get("risk_status") or "").strip().lower()
-            if _risk_status_raw == "fully covered":
-                _risk_status_label = "✅ Fully covered"
-            elif _risk_status_raw == "partially covered":
-                _risk_status_label = "🟡 Partially covered"
-            else:
-                _risk_status_label = "🔴 Not covered"
-            _mitigation_rows.append(
-                {
-                    "Financial risk": _risk_label,
-                    "MCR Project": "",
-                    "Task": "",
-                    "Initial risk amount": _initial,
-                    "Covered (mitigated) amount": _covered,
-                    "Remaining amount": _remaining,
-                    "Risk status": _risk_status_label,
-                }
-            )
-            if _is_expanded:
-                for _m in _risk_mappings:
-                    _mitigation_rows.append(
-                        {
-                            "Financial risk": "    ↳ Covered by",
-                            "MCR Project": str(_m.get("mapped_mcr") or ""),
-                            "Task": str(_m.get("mapped_task_name") or ""),
-                            "Initial risk amount": None,
-                            "Covered (mitigated) amount": float(_m.get("covered_amount") or 0.0),
-                            "Remaining amount": None,
-                            "Risk status": "",
-                        }
-                    )
-
-        if _mitigation_rows:
-            _mitigation_total = {
-                "Financial risk": "TOTAL",
-                "MCR Project": "",
-                "Task": "",
-                "Initial risk amount": _risk_initial_total,
-                "Covered (mitigated) amount": _risk_covered_total,
-                "Remaining amount": _risk_remaining_total,
-                "Risk status": "",
+            _total_initial_amount = float(_rr.get("total_initial_amount") or 0.0)
+            _remaining_amount = float(_rr.get("remaining_amount") or 0.0)
+            _row = {
+                "Financial risk": _rr.get("risk_name") or "",
+                "Total Initial Amount": _total_initial_amount,
+                "Month identified": _fr_fmt_ym(_rr.get("month_identified_ym") or ""),
+                "Risk status": _rr.get("risk_status") or "",
+                "Total covered amount": max(0.0, _total_initial_amount - _remaining_amount),
             }
-            _mitigation_df = pd.DataFrame(_mitigation_rows + [_mitigation_total])
+            for _m in _fr_months:
+                _row[_m] = float((_rr.get("monthly") or {}).get(_m, 0.0) or 0.0)
+            _row["Remaining risk amount (Total)"] = _remaining_amount
+            _fr_table_rows.append(_row)
+
+        _show_fr_month_cols = st.toggle(
+            "Show monthly columns in risk summary",
+            value=False,
+            key=f"fr_show_month_cols_{project_id}",
+        )
+
+        if _fr_table_rows:
+            _fr_df = pd.DataFrame(_fr_table_rows)
+            _fr_month_cols = [m for m in _fr_months if m in _fr_df.columns]
+            _fr_base_cols = [
+                "Financial risk",
+                "Total Initial Amount",
+                "Month identified",
+                "Risk status",
+                "Total covered amount",
+                "Remaining risk amount (Total)",
+            ]
+            _fr_display_cols = _fr_base_cols + (_fr_month_cols if _show_fr_month_cols else [])
+            _fr_df_view = _fr_df[_fr_display_cols].copy()
+            _fr_currency_cols = ["Total Initial Amount", "Total covered amount", "Remaining risk amount (Total)"]
+            if _show_fr_month_cols:
+                _fr_currency_cols += _fr_month_cols
+
+            _fr_total_row = {c: "" for c in _fr_display_cols}
+            _fr_total_row["Financial risk"] = "TOTAL"
+            for _c in _fr_currency_cols:
+                _fr_total_row[_c] = _fr_df_view[_c].sum() if _c in _fr_df_view.columns else 0.0
+            _fr_df_with_total = pd.concat([_fr_df_view, pd.DataFrame([_fr_total_row])], ignore_index=True)
             st.dataframe(
-                _mitigation_df,
+                _fr_df_with_total,
                 hide_index=True,
                 use_container_width=True,
                 column_config={
-                    "Initial risk amount": st.column_config.NumberColumn(format="€ %,.2f"),
-                    "Covered (mitigated) amount": st.column_config.NumberColumn(format="€ %,.2f"),
-                    "Remaining amount": st.column_config.NumberColumn(format="€ %,.2f"),
+                    c: st.column_config.NumberColumn(format="€ %,.2f")
+                    for c in _fr_currency_cols
                 },
-            )
-            _mitigation_xlsx = BytesIO()
-            with pd.ExcelWriter(_mitigation_xlsx, engine="openpyxl") as _writer:
-                _mitigation_df.to_excel(_writer, index=False, sheet_name="Risk mitigation")
-                _ws = _writer.sheets["Risk mitigation"]
-                for _col in _ws.columns:
-                    _max_len = max(len(str(_cell.value or "")) for _cell in _col)
-                    _ws.column_dimensions[_col[0].column_letter].width = min(max(_max_len + 2, 12), 45)
-            _safe_project_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(project.get("name") or "project")).strip("_") or "project"
-            st.download_button(
-                "Download as XLSX",
-                data=_mitigation_xlsx.getvalue(),
-                file_name=f"financial_risk_mitigation_{_safe_project_name}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key=f"fr_mitigation_xlsx_{project_id}",
             )
         else:
             st.info("No financial risks yet.")
 
-        if _fr_map_rows:
-            _del_map_options = {
-                f"[{int(m.get('id') or 0)}] {_fr_name_by_id.get(int(m.get('risk_id') or 0), '')} | {m.get('mapped_mcr') or ''} | {m.get('mapped_task_name') or ''}": int(m.get("id") or 0)
-                for m in _fr_map_rows
-            }
-            _dm_c1, _dm_c2 = st.columns([4, 1])
-            _del_map_pick = _dm_c1.selectbox("Delete risk mitigation", list(_del_map_options.keys()), key=f"fr_del_map_pick_{project_id}")
-            _dm_c2.write("")
-            _dm_c2.write("")
-            if _dm_c2.button("Delete risk mitigation", key=f"fr_del_map_btn_{project_id}"):
-                db.delete_financial_risk_mapping(_del_map_options[_del_map_pick])
-                st.success("Mapping deleted.")
+        if _fr_rows_raw:
+            _del_risk_options = {f"[{r['id']}] {r.get('risk_name') or ''}": int(r["id"]) for r in _fr_rows_raw}
+            _dr_c1, _dr_c2 = st.columns([4, 1])
+            _del_risk_pick = _dr_c1.selectbox("Delete risk", list(_del_risk_options.keys()), key=f"fr_del_risk_pick_{project_id}")
+            _dr_c2.write("")
+            _dr_c2.write("")
+            if _dr_c2.button("Delete risk", key=f"fr_del_risk_btn_{project_id}"):
+                db.delete_financial_risk(_del_risk_options[_del_risk_pick])
+                st.success("Financial risk deleted.")
                 st.rerun()
 
+        st.markdown("**5.2.2 Coverage mappings (one risk to many MCR/Task lines)**")
+        if not _fr_rows_raw:
+            st.info("Create at least one financial risk first.")
+        else:
+            _fr_name_by_id = {int(r["id"]): str(r.get("risk_name") or "") for r in _fr_rows_raw}
+            _map_risk_options = {f"[{r['id']}] {r.get('risk_name') or ''}": int(r["id"]) for r in _fr_rows_raw}
+            _map_risk_label = st.selectbox("Risk for mapping", list(_map_risk_options.keys()), key=f"fr_map_risk_{project_id}")
+            _map_risk_id = _map_risk_options[_map_risk_label]
+            _map_risk_row = next((r for r in _fr_rows_raw if int(r["id"]) == int(_map_risk_id)), None)
+            _map_existing = [m for m in _fr_map_rows if int(m.get("risk_id") or 0) == int(_map_risk_id)]
+
+            with st.form(key=f"fr_map_form_{project_id}"):
+                _fm_c1, _fm_c2, _fm_c3 = st.columns([2, 2, 1])
+                _map_mcr = _fm_c1.text_input("Mapping to MCR Project No.", value="")
+                _map_task = _fm_c2.text_input("Mapping to Task", value="")
+                _map_amount = _fm_c3.number_input("Covered amount (€)", min_value=0.0, step=0.01, format="%.2f", value=0.0)
+                _save_map = st.form_submit_button("Add mapping")
+                if _save_map:
+                    _errors = []
+                    _mcr = str(_map_mcr or "").strip()
+                    _task = str(_map_task or "").strip()
+                    _covered = round(float(_map_amount or 0.0), 2)
+                    if not _mcr:
+                        _errors.append("Mapping to MCR Project No. is required.")
+                    if not _task:
+                        _errors.append("Mapping to Task is required.")
+                    if _covered <= 0:
+                        _errors.append("Covered amount must be greater than 0.")
+
+                    _initial = round(float((_map_risk_row or {}).get("total_initial_amount") or 0.0), 2)
+                    _already = round(sum(float(m.get("covered_amount") or 0.0) for m in _map_existing), 2)
+                    if _already + _covered > _initial + 0.0001:
+                        _errors.append("Total covered amount cannot exceed Total Initial Amount.")
+
+                    if _errors:
+                        st.error(" ".join(_errors))
+                    else:
+                        db.create_financial_risk_mapping(project_id, _map_risk_id, _mcr, _task, _covered)
+                        st.success("Mapping added.")
+                        st.rerun()
+
+            st.markdown("All mappings in this project")
+            if _fr_map_rows:
+                _all_map_df = pd.DataFrame(
+                    [
+                        {
+                            "ID": int(m.get("id") or 0),
+                            "Financial risk": _fr_name_by_id.get(int(m.get("risk_id") or 0), ""),
+                            "Mapped MCR": str(m.get("mapped_mcr") or ""),
+                            "Mapped Task": str(m.get("mapped_task_name") or ""),
+                            "Covered amount": float(m.get("covered_amount") or 0.0),
+                        }
+                        for m in _fr_map_rows
+                    ]
+                )
+                _all_map_total = {"Financial risk": "TOTAL", "Mapped MCR": "", "Mapped Task": "", "Covered amount": _all_map_df["Covered amount"].sum()}
+                _all_map_df_with_total = pd.concat([_all_map_df.drop(columns=["ID"]), pd.DataFrame([_all_map_total])], ignore_index=True)
+                st.dataframe(
+                    _all_map_df_with_total,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={"Covered amount": st.column_config.NumberColumn(format="€ %,.2f")},
+                )
+            else:
+                st.info("No coverage mappings yet.")
+
+            if _fr_map_rows:
+                _del_map_options = {
+                    f"[{int(m.get('id') or 0)}] {_fr_name_by_id.get(int(m.get('risk_id') or 0), '')} | {m.get('mapped_mcr') or ''} | {m.get('mapped_task_name') or ''}": int(m.get("id") or 0)
+                    for m in _fr_map_rows
+                }
+                _dm_c1, _dm_c2 = st.columns([4, 1])
+                _del_map_pick = _dm_c1.selectbox("Delete mapping", list(_del_map_options.keys()), key=f"fr_del_map_pick_{project_id}")
+                _dm_c2.write("")
+                _dm_c2.write("")
+                if _dm_c2.button("Delete mapping", key=f"fr_del_map_btn_{project_id}"):
+                    db.delete_financial_risk_mapping(_del_map_options[_del_map_pick])
+                    st.success("Mapping deleted.")
+                    st.rerun()
+
 # ════════════════════════════════════════════════════════════════════════════
-elif page == "🔗 7. Task Mappings":
-    st.title("🔗 7. Task Name Mappings")
+elif page == "🔗 Task Mappings":
+    st.title("🔗 Task Name Mappings")
     st.caption(
         "Map actuals records to plan task names using both Task Name and MCR (Project No.) for precise control. "
         "Leave MCR blank to create a catch-all mapping for a task name across all MCRs."
@@ -8015,16 +7785,16 @@ elif page == "🔗 7. Task Mappings":
 
 # ════════════════════════════════════════════════════════════════════════════
 # ════════════════════════════════════════════════════════════════════════════
-# 8. EXPORT
+# 7. EXPORT
 # ════════════════════════════════════════════════════════════════════════════
-elif page == "📤 8. Export":
-    st.title("📤 8. Export to Excel")
-    st.caption("Reference: 8.1 Export scope | 8.2 Master file export")
+elif page == "📤 Export":
+    st.title("📤 7. Export to Excel")
+    st.caption("Reference: 7.1 Export scope | 7.2 Master file export")
     project_id, project = select_project()
     if not project_id:
         st.stop()
 
-    st.markdown(f"8.1 Export all data for **{project['name']}** as an Excel workbook with multiple sheets.")
+    st.markdown(f"7.1 Export all data for **{project['name']}** as an Excel workbook with multiple sheets.")
 
     if st.button("Generate Excel Report"):
         budget_items = db.get_budget_items(project_id)
@@ -8072,9 +7842,9 @@ elif page == "📤 8. Export":
         )
         st.success("Report ready — click the button above to download.")
 
-    # ── 8.2 Master file export ────────────────────────────────────────────────
+    # ── 7.2 Master file export ────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("📊 **8.2 Master file export**")
+    st.markdown("📊 **7.2 Master file export**")
     st.caption(
         "Task-level export combining Plan and Actuals by month. "
         "MCR Project No. and Task taken from Budget Planning (section 3)."
@@ -8349,119 +8119,6 @@ elif page == "📤 8. Export":
         )
         st.success(f"Master export ready — {len(_export_rows)} tasks, {len(_exp_months)} months.")
         st.dataframe(_master_df, use_container_width=True, hide_index=True)
-
-# ════════════════════════════════════════════════════════════════════════════
-# 9. OPERATING GUIDE
-# ════════════════════════════════════════════════════════════════════════════
-elif page == "🧭 9. Operating Guide":
-    st.title("🧭 9. Operating Guide")
-    st.caption("Reference: 9.1 Data flow overview | 9.2 Monthly update checklist | 9.3 Source files | 9.4 Import data expectations | 9.5 App workflow by section | 9.6 Quality checks before reporting")
-
-    st.info(
-        "Use this guide as the monthly operating checklist for updating plans, importing actuals from MCR Excel exports, "
-        "validating mappings, reviewing forecast changes, and preparing reporting outputs."
-    )
-
-    st.markdown("**9.1 Data flow overview**")
-    _flow_cols = st.columns(7)
-    _flow_steps = [
-        ("MCR Excel exports", "Actual labour and other costs"),
-        ("Import actuals", "Section 4"),
-        ("Validate mappings", "Section 7"),
-        ("Review dashboard", "Section 1"),
-        ("Adjust forecast", "Section 5"),
-        ("Update risks", "Section 6"),
-        ("Export report", "Section 8"),
-    ]
-    for _idx, (_title, _subtitle) in enumerate(_flow_steps):
-        with _flow_cols[_idx]:
-            st.markdown(f"**{_idx + 1}. {_title}**")
-            st.caption(_subtitle)
-
-    st.markdown("---")
-    st.markdown("**9.2 Monthly update checklist**")
-    st.caption("Typical update cycle at the beginning of each month, using actual data for the previous month.")
-    _monthly_checklist_df = pd.DataFrame(
-        [
-            {"Step": 1, "Activity": "Export previous-month labour actuals from the MCR system", "App section": "External source", "Expected output": "Labour actuals Excel export is available"},
-            {"Step": 2, "Activity": "Export previous-month other costs from the MCR system", "App section": "External source", "Expected output": "Other cost actuals Excel export is available"},
-            {"Step": 3, "Activity": "Import monthly actuals", "App section": "4. Actuals", "Expected output": "Actual labour and other costs are loaded for the previous month"},
-            {"Step": 4, "Activity": "Resolve or confirm task mappings", "App section": "7. Task Mappings", "Expected output": "No relevant unmapped actuals remain"},
-            {"Step": 5, "Activity": "Review dashboard totals and monthly movements", "App section": "1. Dashboard", "Expected output": "Plan, actuals, EAC, and variances look reasonable"},
-            {"Step": 6, "Activity": "Update manual forecast adjustments where needed", "App section": "5. Manual Forecast Adjustment", "Expected output": "Future-month adjustments and reasons are current"},
-            {"Step": 7, "Activity": "Update financial risks and mitigations", "App section": "6. Financial risk", "Expected output": "Open risks, covered amounts, and remaining amounts are current"},
-            {"Step": 8, "Activity": "Generate reporting export", "App section": "8. Export", "Expected output": "Latest reviewed master export is available"},
-        ]
-    )
-    st.dataframe(_monthly_checklist_df, hide_index=True, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("**9.3 Source files**")
-    _source_files_df = pd.DataFrame(
-        [
-            {"Source file": "Actual labour cost export", "Origin system": "MCR system", "Frequency": "Monthly", "Used in app section": "4.2 Import from CSV/Excel (MCR)", "Purpose": "Load previous-month labour actuals"},
-            {"Source file": "Actual other cost export", "Origin system": "MCR system", "Frequency": "Monthly", "Used in app section": "4.2 Import from CSV/Excel (MCR)", "Purpose": "Load previous-month non-labour actuals"},
-            {"Source file": "Budget plan / plan update file", "Origin system": "Planning Excel or maintained plan", "Frequency": "Setup and as needed", "Used in app section": "3.2 Import from Excel / 3.1 Plan", "Purpose": "Maintain tasks, MCR buckets, resource groups, and monthly plan values"},
-            {"Source file": "Reporting export", "Origin system": "Budget Management Assistant", "Frequency": "After monthly review", "Used in app section": "8. Export", "Purpose": "Create reviewed output for reporting and downstream analysis"},
-        ]
-    )
-    st.dataframe(_source_files_df, hide_index=True, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("**9.4 Import data expectations**")
-    st.caption("The app is updated from Excel/XLSX files. Budget Planning imports define the planned structure and monthly plan values; Actuals imports add the realised costs from MCR exports.")
-    _import_expectations_df = pd.DataFrame(
-        [
-            {
-                "Target section": "3. Budget Planning",
-                "Import purpose": "Create or update the plan baseline",
-                "Expected Excel content": "One row per planned task / resource group / MCR bucket, with monthly plan amounts across the project timeline",
-                "Important fields": "Task name, Resource group, MCR Project No., RG type / organisation if available, monthly plan values, total plan",
-                "Typical timing": "Project setup and whenever the plan structure or future plan values change",
-                "After import": "Check section 3.1 table layout and dashboard plan totals before using the plan for forecast or reporting",
-            },
-            {
-                "Target section": "4. Actuals",
-                "Import purpose": "Load previous-month realised cost data",
-                "Expected Excel content": "MCR export rows for actual labour and other costs posted in the previous month",
-                "Important fields": "Posting date / booking month, cost amount, project no. / MCR, task name, resource group or employee, cost category / description if available",
-                "Typical timing": "At the beginning of each new month, after the previous month is closed in MCR",
-                "After import": "Review monthly actuals, resolve task mappings in section 7, then validate dashboard totals and MCR/task breakdowns",
-            },
-        ]
-    )
-    st.dataframe(_import_expectations_df, hide_index=True, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("**9.5 App workflow by section**")
-    _section_workflow_df = pd.DataFrame(
-        [
-            {"Section": "1. Dashboard", "Role in workflow": "Review totals, trends, deviations, and financial risk exposure", "When to use": "After imports, mapping updates, and forecast/risk changes"},
-            {"Section": "2. Projects", "Role in workflow": "Create or maintain project master data and date range", "When to use": "Project setup or master-data changes"},
-            {"Section": "3. Budget Planning", "Role in workflow": "Maintain plan tasks, MCR project buckets, resource groups, and monthly plan values", "When to use": "Project setup, baseline updates, or plan structure changes"},
-            {"Section": "4. Actuals", "Role in workflow": "Import and review monthly actual cost records", "When to use": "At the beginning of each month for previous-month actuals"},
-            {"Section": "5. Manual Forecast Adjustment", "Role in workflow": "Adjust future forecast values and capture reasons", "When to use": "Monthly forecast review or approved manual updates"},
-            {"Section": "6. Financial risk", "Role in workflow": "Register financial risks and map mitigations to approved MCR/Task lines", "When to use": "Monthly review or whenever risk exposure changes"},
-            {"Section": "7. Task Mappings", "Role in workflow": "Resolve actual task names to planned task names, including MCR-specific mapping", "When to use": "After actuals import or when unmapped task names appear"},
-            {"Section": "8. Export", "Role in workflow": "Generate Excel outputs for reporting", "When to use": "After data checks and review are complete"},
-        ]
-    )
-    st.dataframe(_section_workflow_df, hide_index=True, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("**9.6 Quality checks before reporting**")
-    _quality_checks_df = pd.DataFrame(
-        [
-            {"Check": "Project selection and date range", "Where": "2. Projects", "Expected result": "Project metadata reflects the active reporting scope"},
-            {"Check": "Previous-month actuals imported", "Where": "4. Actuals / 1.3 Monthly Actuals vs. Plan", "Expected result": "Monthly actuals include the latest closed month"},
-            {"Check": "Unmapped actuals resolved", "Where": "7. Task Mappings", "Expected result": "No relevant unmapped task/MCR combinations remain"},
-            {"Check": "MCR-level actuals and EAC reviewed", "Where": "1.5 Actuals by Project MCR / 5.1 Manual Forecast Adjustment", "Expected result": "EAC and forecast adjustments are explainable"},
-            {"Check": "Adjustment reasons complete", "Where": "5. Manual Forecast Adjustment", "Expected result": "All manual forecast changes have a reason"},
-            {"Check": "Financial risks current", "Where": "6. Financial risk", "Expected result": "Initial, covered, and remaining risk amounts are up to date"},
-            {"Check": "Export generated after review", "Where": "8. Export", "Expected result": "Master export reflects the reviewed project state"},
-        ]
-    )
-    st.dataframe(_quality_checks_df, hide_index=True, use_container_width=True)
 
 
 
