@@ -203,88 +203,6 @@ def _canonical_project_mcr(raw_value):
     return match.group(1) if match else txt
 
 
-def _looks_like_excel_month_header(column_name):
-    txt = str(column_name or "").strip()
-    if not txt:
-        return False
-    if re.fullmatch(r"\d{4}-\d{2}", txt):
-        return True
-    if re.fullmatch(r"[A-Za-z]{3}[ -]\d{2}", txt):
-        return True
-    return False
-
-
-def _infer_excel_currency_columns(df):
-    currency_columns = []
-    for _col in df.columns:
-        if not pd.api.types.is_numeric_dtype(df[_col]):
-            continue
-        _label = str(_col or "").strip()
-        _norm = _norm_key_tokens(_label)
-        if not _label:
-            continue
-        if "%" in _label or "pct" in _norm or "percent" in _norm or "share" in _norm:
-            continue
-        if _norm in {"id", "task id", "risk id", "mapping id", "row count"}:
-            continue
-        if any(_norm.endswith(_suffix) for _suffix in [" id", " count", " rows", " number"]):
-            continue
-        if (
-            "€" in _label
-            or _looks_like_excel_month_header(_label)
-            or any(_token in _norm for _token in [
-                "budget",
-                "actual",
-                "forecast",
-                "eac",
-                "etc",
-                "variance",
-                "amount",
-                "cost",
-                "plan",
-                "prognosis",
-                "covered",
-                "mitigation",
-                "remaining",
-                "exposure",
-                "gap",
-                "value",
-                "rate per hour",
-                "hourly rate",
-                "total",
-            ])
-        ):
-            currency_columns.append(_label)
-    return currency_columns
-
-
-def _apply_excel_currency_format(_ws, _df, currency_columns=None, currency_format='€ #,##0.00', width_min=12, width_max=50):
-    from openpyxl.utils import get_column_letter
-
-    _currency_columns = set(currency_columns or _infer_excel_currency_columns(_df))
-    _col_names = [str(_c) for _c in _df.columns]
-    _col_widths = {idx: len(_col_names[idx - 1]) for idx in range(1, len(_col_names) + 1)}
-
-    for _col_idx, _col_name in enumerate(_col_names, start=1):
-        _header_cell = _ws.cell(row=1, column=_col_idx)
-        _col_widths[_col_idx] = max(_col_widths[_col_idx], len(str(_header_cell.value or "")))
-        if _col_name not in _currency_columns:
-            continue
-        for _row_idx in range(2, len(_df) + 2):
-            _data_cell = _ws.cell(row=_row_idx, column=_col_idx)
-            if isinstance(_data_cell.value, (int, float)) and not isinstance(_data_cell.value, bool):
-                _data_cell.number_format = currency_format
-
-    for _row in _ws.iter_rows():
-        for _cell in _row:
-            if _cell.value is None:
-                continue
-            _col_widths[_cell.column] = max(_col_widths.get(_cell.column, 0), len(str(_cell.value)))
-
-    for _col_idx, _width in _col_widths.items():
-        _ws.column_dimensions[get_column_letter(_col_idx)].width = min(max(_width + 2, width_min), width_max)
-
-
 def _select_best_project_mcr_col(plan_cols, plan_tasks, text_values_map, value_map):
     candidates = [c for c in plan_cols if _is_project_mcr_like_column(c)]
     if not candidates:
@@ -1722,27 +1640,16 @@ if page == "🏠 1. Dashboard":
                             if _pf_analysis_df.empty:
                                 st.info("No budget/Forecast EAC rows available for the selected Project No. scope.")
                             else:
-                                _gap_col = "Gap (Forecast EAC vs Budget) (€)"
-                                _gap_pct_col = "Gap (Forecast EAC vs Budget) (%)"
+                                _gap_col = "Gap (Forecast EAC vs Budget)"
+                                _gap_pct_col = "Gap vs Budget (%)"
                                 _driver_contrib_col = "Driver Contribution (%)"
-                                if _gap_col not in _pf_analysis_df.columns:
-                                    if "Overshoot (€)" in _pf_analysis_df.columns:
-                                        _pf_analysis_df[_gap_col] = _pf_analysis_df["Overshoot (€)"]
-                                    else:
-                                        _pf_analysis_df[_gap_col] = (
-                                            pd.to_numeric(_pf_analysis_df.get("Forecast EAC (€)", 0.0), errors="coerce").fillna(0.0)
-                                            - pd.to_numeric(_pf_analysis_df.get("Budget (€)", 0.0), errors="coerce").fillna(0.0)
-                                        )
                                 _pf_analysis_df[_gap_col] = pd.to_numeric(_pf_analysis_df[_gap_col], errors="coerce").fillna(0.0)
                                 _pf_analysis_df["Budget (€)"] = pd.to_numeric(_pf_analysis_df["Budget (€)"], errors="coerce").fillna(0.0)
                                 _pf_analysis_df["Forecast EAC (€)"] = pd.to_numeric(_pf_analysis_df["Forecast EAC (€)"], errors="coerce").fillna(0.0)
                                 _pf_analysis_df["Prognosis (YTD actuals) (€)"] = pd.to_numeric(_pf_analysis_df["Prognosis (YTD actuals) (€)"], errors="coerce").fillna(0.0)
                                 _pf_analysis_df["Risk mitigation coverage (€)"] = pd.to_numeric(_pf_analysis_df.get("Risk mitigation coverage (€)", 0.0), errors="coerce").fillna(0.0)
-                                _prognosis_gap_col = "Gap (Prognosis (YTD actuals) vs Budget) (€)"
+                                _prognosis_gap_col = "Gap (Prognosis (YTD actuals) vs Budget)"
                                 _pf_analysis_df[_prognosis_gap_col] = _pf_analysis_df["Prognosis (YTD actuals) (€)"] - _pf_analysis_df["Budget (€)"]
-                                _pf_analysis_df["Risk-mitigated Forecast EAC (€)"] = _pf_analysis_df["Forecast EAC (€)"] - _pf_analysis_df["Risk mitigation coverage (€)"]
-                                _risk_mitigated_gap_col = "Gap (Risk-mitigated Forecast EAC vs Budget)"
-                                _pf_analysis_df[_risk_mitigated_gap_col] = _pf_analysis_df["Risk-mitigated Forecast EAC (€)"] - _pf_analysis_df["Budget (€)"]
                                 _pf_analysis_df[_gap_pct_col] = _pf_analysis_df.apply(
                                     lambda _r: (float(_r[_gap_col]) / float(_r["Budget (€)"]) * 100.0) if abs(float(_r["Budget (€)"])) > 0.000001 else (100.0 if float(_r[_gap_col]) > 0 else (-100.0 if float(_r[_gap_col]) < 0 else 0.0)),
                                     axis=1,
@@ -1906,16 +1813,14 @@ if page == "🏠 1. Dashboard":
                                         "Status",
                                         "Budget (€)",
                                         "YTD Actual (€)",
+                                        "Forecast EAC (€)",
+                                        "Risk mitigation coverage (€)",
+                                        "Risk mitigation implementation status",
                                         "Prognosis (YTD actuals) (€)",
                                         _prognosis_gap_col,
-                                    "Forecast EAC (€)",
                                         _gap_col,
                                         _gap_pct_col,
                                         _driver_contrib_col,
-                                    "Risk mitigation coverage (€)",
-                                    "Risk mitigation implementation status",
-                                    "Risk-mitigated Forecast EAC (€)",
-                                        _risk_mitigated_gap_col,
                                     ]
                                 _pf_table_df = _pf_analysis_df.sort_values(_gap_col, ascending=False)[_pf_table_cols].copy()
                                 _table_status_values = []
@@ -1931,20 +1836,14 @@ if page == "🏠 1. Dashboard":
                                     "Status": "TOTAL",
                                     "Budget (€)": _pf_budget_total_summary,
                                     "YTD Actual (€)": float(pd.to_numeric(_pf_analysis_df["YTD Actual (€)"], errors="coerce").fillna(0.0).sum()),
+                                    "Risk mitigation coverage (€)": float(pd.to_numeric(_pf_analysis_df["Risk mitigation coverage (€)"], errors="coerce").fillna(0.0).sum()),
+                                    "Risk mitigation implementation status": _pf_format_mitigation_statuses(_table_status_values),
                                     "Prognosis (YTD actuals) (€)": float(pd.to_numeric(_pf_analysis_df["Prognosis (YTD actuals) (€)"], errors="coerce").fillna(0.0).sum()),
                                     _prognosis_gap_col: float(pd.to_numeric(_pf_analysis_df[_prognosis_gap_col], errors="coerce").fillna(0.0).sum()),
                                     "Forecast EAC (€)": _pf_forecast_eac_total_summary,
                                     _gap_col: _pf_gap_summary,
                                     _gap_pct_col: _pf_gap_pct,
                                     _driver_contrib_col: None,
-                                    "Risk mitigation coverage (€)": float(pd.to_numeric(_pf_analysis_df["Risk mitigation coverage (€)"], errors="coerce").fillna(0.0).sum()),
-                                    "Risk mitigation implementation status": _pf_format_mitigation_statuses(_table_status_values),
-                                    "Risk-mitigated Forecast EAC (€)": _pf_forecast_eac_total_summary - float(pd.to_numeric(_pf_analysis_df["Risk mitigation coverage (€)"], errors="coerce").fillna(0.0).sum()),
-                                    _risk_mitigated_gap_col: (
-                                        _pf_forecast_eac_total_summary
-                                        - float(pd.to_numeric(_pf_analysis_df["Risk mitigation coverage (€)"], errors="coerce").fillna(0.0).sum())
-                                        - _pf_budget_total_summary
-                                    ),
                                 }
                                 _pf_table_df = pd.concat([_pf_table_df, pd.DataFrame([_total_row])], ignore_index=True)
 
@@ -1982,11 +1881,9 @@ if page == "🏠 1. Dashboard":
                                         _gap_col: "€ {:,.0f}",
                                         _gap_pct_col: "{:+.1f}%",
                                         _driver_contrib_col: "{:.1f}%",
-                                        "Risk-mitigated Forecast EAC (€)": "€ {:,.0f}",
-                                        _risk_mitigated_gap_col: "€ {:,.0f}",
                                     }, na_rep="")
                                     .map(_pf_status_style, subset=["Status"])
-                                    .map(_pf_gap_style, subset=[_gap_col, _prognosis_gap_col, _gap_pct_col, _risk_mitigated_gap_col])
+                                    .map(_pf_gap_style, subset=[_gap_col, _prognosis_gap_col, _gap_pct_col])
                                 )
 
                                 st.dataframe(
@@ -2003,13 +1900,11 @@ if page == "🏠 1. Dashboard":
                                         _gap_col: st.column_config.NumberColumn(format="€ %,.0f"),
                                         _gap_pct_col: st.column_config.NumberColumn(format="%.1f%%"),
                                         _driver_contrib_col: st.column_config.NumberColumn(format="%.1f%%"),
-                                        "Risk-mitigated Forecast EAC (€)": st.column_config.NumberColumn(format="€ %,.0f"),
-                                        _risk_mitigated_gap_col: st.column_config.NumberColumn(format="€ %,.0f"),
                                     },
                                 )
                                 _pf_export_buf = BytesIO()
                                 with pd.ExcelWriter(_pf_export_buf, engine="openpyxl") as _pf_export_writer:
-                                    _pf_scope_df = pd.DataFrame(
+                                    pd.DataFrame(
                                         [
                                             {"Field": "Global project", "Value": _cmp_proj_name},
                                             {"Field": "Project No. scope", "Value": _scope_mcr_text},
@@ -2017,9 +1912,8 @@ if page == "🏠 1. Dashboard":
                                             {"Field": "Forecast EAC basis", "Value": "Completed-month actuals plus future plan/forecast overrides"},
                                             {"Field": "Residual Financial Risk", "Value": "Excluded"},
                                         ]
-                                    )
-                                    _pf_scope_df.to_excel(_pf_export_writer, index=False, sheet_name="Scope")
-                                    _pf_kpi_df = pd.DataFrame(
+                                    ).to_excel(_pf_export_writer, index=False, sheet_name="Scope")
+                                    pd.DataFrame(
                                         [
                                             {"Metric": f"{_summary_scope_label} Budget Total", "Value": _pf_budget_total_summary},
                                             {"Metric": f"{_summary_scope_label} Forecast EAC", "Value": _pf_forecast_eac_total_summary},
@@ -2031,8 +1925,7 @@ if page == "🏠 1. Dashboard":
                                             {"Metric": "Underspending drivers (%)", "Value": _underspend_share},
                                             {"Metric": "On-track drivers (%)", "Value": _on_track_share},
                                         ]
-                                    )
-                                    _pf_kpi_df.to_excel(_pf_export_writer, index=False, sheet_name="Executive KPIs")
+                                    ).to_excel(_pf_export_writer, index=False, sheet_name="Executive KPIs")
                                     _pf_export_detail_cols = [
                                         "Project MCR #",
                                         "Driver",
@@ -2040,40 +1933,18 @@ if page == "🏠 1. Dashboard":
                                         "Status",
                                         "Budget (€)",
                                         "YTD Actual (€)",
+                                        "Forecast EAC (€)",
+                                        "Risk mitigation coverage (€)",
+                                        "Risk mitigation implementation status",
                                         "Prognosis (YTD actuals) (€)",
                                         _prognosis_gap_col,
-                                        "Forecast EAC (€)",
                                         _gap_col,
                                         _gap_pct_col,
                                         _driver_contrib_col,
-                                        "Risk mitigation coverage (€)",
-                                        "Risk mitigation implementation status",
-                                        "Risk-mitigated Forecast EAC (€)",
-                                        _risk_mitigated_gap_col,
                                     ]
                                     _pf_export_detail_df = _pf_table_df[_pf_export_detail_cols].copy()
                                     _pf_export_detail_df.to_excel(_pf_export_writer, index=False, sheet_name="Forecast EAC Gap Detail")
-                                    _apply_excel_currency_format(_pf_export_writer.sheets["Scope"], _pf_scope_df)
-                                    _pf_kpi_ws = _pf_export_writer.sheets["Executive KPIs"]
-                                    _apply_excel_currency_format(_pf_kpi_ws, _pf_kpi_df, currency_columns=[])
-                                    for _row_idx, _metric in enumerate(_pf_kpi_df["Metric"], start=2):
-                                        _value_cell = _pf_kpi_ws.cell(row=_row_idx, column=2)
-                                        if not isinstance(_value_cell.value, (int, float)) or isinstance(_value_cell.value, bool):
-                                            continue
-                                        if "%" in str(_metric):
-                                            _value_cell.number_format = '0.0"%"'
-                                        else:
-                                            _value_cell.number_format = '€ #,##0.00'
-                                    _apply_excel_currency_format(_pf_export_writer.sheets["Forecast EAC Gap Detail"], _pf_export_detail_df)
                                     _pf_detail_ws = _pf_export_writer.sheets["Forecast EAC Gap Detail"]
-                                    _pf_detail_percent_cols = {_gap_pct_col, _driver_contrib_col}
-                                    for _col_idx, _header in enumerate(_pf_export_detail_df.columns, start=1):
-                                        if str(_header) not in _pf_detail_percent_cols:
-                                            continue
-                                        for _row_idx in range(2, len(_pf_export_detail_df) + 2):
-                                            _cell = _pf_detail_ws.cell(row=_row_idx, column=_col_idx)
-                                            if isinstance(_cell.value, (int, float)) and not isinstance(_cell.value, bool):
-                                                _cell.number_format = '0.0"%"'
                                     _pf_detail_ws.freeze_panes = "A2"
                                     _pf_detail_ws.auto_filter.ref = _pf_detail_ws.dimensions
                                     for _col in _pf_detail_ws.columns:
@@ -4671,7 +4542,7 @@ if page == "🏠 1. Dashboard":
                 "Task-level management view combining task attributes, budget plan, YTD rolling prognosis, section 5.1 Forecast EAC, "
                 "risk-origin links, mitigation mappings, and one risk-adjusted management view."
             )
-            st.info("Tasks can play two separate roles here: they can be the origin of a linked risk, or they can carry mitigation mapped from a risk. Forecast EAC follows section 5.1 logic without residual financial risk. Risk-adjusted view = Forecast EAC - approved mitigation amount for risk-origin tasks. Mitigation-mapping tasks contribute 0 unless mitigation status is approved. For standalone risks, see 'Mitigation coverage' for mapped tasks, statuses, and remaining exposure.")
+            st.info("Tasks can play two separate roles here: they can be the origin of a linked risk, or they can carry mitigation mapped from a risk. Forecast EAC follows section 5.1 logic without residual financial risk. Risk-adjusted view = Forecast EAC - approved mitigation amount for risk-origin tasks. Mitigation-mapping tasks contribute 0 unless mitigation status is approved.")
 
             _mgmt_pmap = {p["name"]: p for p in projects}
             _mgmt_project_name = st.selectbox(
@@ -4873,7 +4744,6 @@ if page == "🏠 1. Dashboard":
                                 "approved": 0.0,
                                 "non_approved": 0.0,
                                 "statuses": set(),
-                                "coverage_items": [],
                             }
                             continue
                         _risk_key = (
@@ -4904,14 +4774,6 @@ if page == "🏠 1. Dashboard":
                             elif _status != "cancelled":
                                 _mgmt_standalone_by_risk[_risk_id]["non_approved"] += _amount
                             _mgmt_standalone_by_risk[_risk_id]["statuses"].add(_status_label)
-                            _mgmt_standalone_by_risk[_risk_id]["coverage_items"].append(
-                                {
-                                    "mapped_mcr": _canonical_project_mcr(_mit.get("mapped_mcr")) or "(blank)",
-                                    "mapped_task": str(_mit.get("mapped_task_name") or "").strip() or "(blank task)",
-                                    "status": _status_label,
-                                    "amount": _amount,
-                                }
-                            )
                         elif str(_risk_row.get("link_type") or "standalone").strip() == "existing_task":
                             _origin_key = (
                                 _canonical_project_mcr(_risk_row.get("linked_mcr")) or "(blank)",
@@ -5019,7 +4881,6 @@ if page == "🏠 1. Dashboard":
                                 "Approved mitigation amount": _approved_mitigation,
                                 "Planned/identified mitigation": _non_approved_mitigation,
                                 "Risk mitigation status": _mit_status,
-                                "Mitigation coverage": "",
                                 "Remaining risk exposure": _remaining_risk,
                                 "Risk-adjusted view": _management_eac,
                             }
@@ -5037,25 +4898,6 @@ if page == "🏠 1. Dashboard":
                         _initial = float(_sr.get("initial", 0.0) or 0.0)
                         _approved = float(_sr.get("approved", 0.0) or 0.0)
                         _non_approved = float(_sr.get("non_approved", 0.0) or 0.0)
-                        _remaining = max(_initial - _approved, 0.0)
-                        _coverage_items = list(_sr.get("coverage_items") or [])
-                        _coverage_parts = []
-                        for _ci in _coverage_items:
-                            _ci_mcr = str(_ci.get("mapped_mcr") or "(blank)")
-                            _ci_task = str(_ci.get("mapped_task") or "(blank task)")
-                            _ci_status = str(_ci.get("status") or "Unknown")
-                            _ci_amount = float(_ci.get("amount") or 0.0)
-                            _coverage_parts.append(f"{_ci_mcr} / {_ci_task}: {_ci_status} (€ {_ci_amount:,.0f})")
-                        _coverage_max_items = 2
-                        if _coverage_parts:
-                            _coverage_shown = _coverage_parts[:_coverage_max_items]
-                            _coverage_more = max(len(_coverage_parts) - _coverage_max_items, 0)
-                            _coverage_detail = "; ".join(_coverage_shown)
-                            if _coverage_more > 0:
-                                _coverage_detail += f"; +{_coverage_more} more"
-                        else:
-                            _coverage_detail = "No mapped mitigation actions"
-                        _mitigation_coverage = f"€ {_approved:,.0f} approved + € {_non_approved:,.0f} planned/identified; {_coverage_detail} -> € {_remaining:,.0f} remaining"
                         _mgmt_rows.append(
                             {
                                 "Row type": "Standalone risk",
@@ -5074,12 +4916,11 @@ if page == "🏠 1. Dashboard":
                                 "Origin risk amount": _initial,
                                 "Mitigated financial risk": "",
                                 "Mitigated risk amount": None,
-                                "Approved mitigation amount": None,
-                                "Planned/identified mitigation": None,
+                                "Approved mitigation amount": _approved,
+                                "Planned/identified mitigation": _non_approved,
                                 "Risk mitigation status": _standalone_mit_status,
-                                "Mitigation coverage": _mitigation_coverage,
-                                "Remaining risk exposure": _remaining,
-                                "Risk-adjusted view": _remaining,
+                                "Remaining risk exposure": max(_initial - _approved, 0.0),
+                                "Risk-adjusted view": max(_initial - _approved, 0.0),
                             }
                         )
 
@@ -5134,28 +4975,6 @@ if page == "🏠 1. Dashboard":
                             _rollup_rows = []
                             for _mcr in sorted(set(_mgmt_df.loc[_rollup_mask, "_mcr_norm"].tolist())):
                                 _slice = _mgmt_df[_rollup_mask & (_mgmt_df["_mcr_norm"] == _mcr)].copy()
-                                _mcr_task_ids = sorted(
-                                    {
-                                        int(_tid)
-                                        for (_kmcr, _ktask), _ids in _mgmt_task_ids_by_key.items()
-                                        if (_canonical_project_mcr(_kmcr) or str(_kmcr or "")) == _mcr
-                                        for _tid in (_ids or [])
-                                    }
-                                )
-
-                                _mcr_actuals_to_date = float(pd.to_numeric(_slice.get("Actuals to date"), errors="coerce").fillna(0.0).sum())
-                                _mcr_future_forecast = 0.0
-                                for _m in _mgmt_future_months:
-                                    if (_mcr, -1, _m) in _mgmt_override_map:
-                                        _mcr_future_forecast += float(_mgmt_override_map.get((_mcr, -1, _m), 0.0) or 0.0)
-                                    else:
-                                        _month_total = 0.0
-                                        for _tid in _mcr_task_ids:
-                                            _base = float(_mgmt_vmap.get((_tid, _m), 0.0) or 0.0)
-                                            _month_total += float(_mgmt_override_map.get((_mcr, _tid, _m), _base) or 0.0)
-                                        _mcr_future_forecast += _month_total
-                                _mcr_forecast_eac = _mcr_actuals_to_date + _mcr_future_forecast
-
                                 _row = {
                                     "Row type": "MCR aggregate",
                                     "MCR Project #": _mcr,
@@ -5166,13 +4985,9 @@ if page == "🏠 1. Dashboard":
                                     "Origin financial risk": _merge_csv_values(_slice["Origin financial risk"]),
                                     "Mitigated financial risk": _merge_csv_values(_slice["Mitigated financial risk"]),
                                     "Risk mitigation status": _merge_status_values(_slice["Risk mitigation status"]),
-                                    "Mitigation coverage": _merge_csv_values(_slice["Mitigation coverage"]) if "Mitigation coverage" in _slice.columns else "",
                                 }
                                 for _col in _numeric_rollup_cols:
                                     _row[_col] = float(pd.to_numeric(_slice.get(_col), errors="coerce").fillna(0.0).sum())
-                                _row["YTD rolling prognosis"] = _mcr_forecast_eac
-                                _row["Forecast EAC"] = _mcr_forecast_eac
-                                _row["Risk-adjusted view"] = float(_mcr_forecast_eac - float(_row.get("Approved mitigation amount", 0.0) or 0.0))
                                 _row["Forecast EAC vs Budget"] = float(_row["Forecast EAC"] - _row["Budget Plan"])
                                 _rollup_rows.append(_row)
 
@@ -5247,6 +5062,8 @@ if page == "🏠 1. Dashboard":
                             ]
 
                             _mgmt_total_source = _mgmt_view
+                            if "Row type" in _mgmt_view.columns:
+                                _mgmt_total_source = _mgmt_view[_mgmt_view["Row type"].astype(str) != "Standalone risk"]
 
                             _mgmt_total_row = {c: "" for c in _mgmt_view.columns}
                             if "Row type" in _mgmt_total_row:
@@ -5265,7 +5082,6 @@ if page == "🏠 1. Dashboard":
                             with pd.ExcelWriter(_mgmt_export, engine="openpyxl") as _writer:
                                 _mgmt_view_display.to_excel(_writer, index=False, sheet_name="MCR Task Summary")
                                 _ws = _writer.sheets["MCR Task Summary"]
-                                _apply_excel_currency_format(_ws, _mgmt_view_display)
                                 for _col in _ws.columns:
                                     _max_len = max(len(str(_cell.value or "")) for _cell in _col)
                                     _ws.column_dimensions[_col[0].column_letter].width = min(max(_max_len + 2, 12), 50)
@@ -5528,9 +5344,9 @@ elif page == "📋 3. Budget Planning":
             _exp_df = plan_df.drop(columns=["_task_id"]).copy()
             _exp_buf = BytesIO()
             with pd.ExcelWriter(_exp_buf, engine="openpyxl") as _ew:
-                _exp_export_df = _exp_df.rename(columns={ck: _month_label(ck) for ck in all_months})
-                _exp_export_df.to_excel(_ew, index=False, sheet_name="Budget Plan")
-                _apply_excel_currency_format(_ew.sheets["Budget Plan"], _exp_export_df)
+                _exp_df.rename(columns={ck: _month_label(ck) for ck in all_months}).to_excel(
+                    _ew, index=False, sheet_name="Budget Plan"
+                )
             _h2.download_button(
                 "📥 Export to Excel",
                 data=_exp_buf.getvalue(),
@@ -6907,7 +6723,6 @@ elif page == "📋 3. Budget Planning":
                                 _bl_buf = BytesIO()
                                 with pd.ExcelWriter(_bl_buf, engine="openpyxl") as _bl_ew:
                                     _snap_df.to_excel(_bl_ew, index=False, sheet_name=_bl["baseline_name"][:31])
-                                    _apply_excel_currency_format(_bl_ew.sheets[_bl["baseline_name"][:31]], _snap_df)
                                 st.download_button(
                                     f"📥 Download {_bl['baseline_name']} as Excel",
                                     data=_bl_buf.getvalue(),
@@ -8844,7 +8659,7 @@ elif page == "🔮 5. Manual Forecast Adjustment":
                         _key = (_mcr_key, _task_name_key)
                         _monthly_by_key.setdefault(_key, {})[_ym] = _monthly_by_key.get(_key, {}).get(_ym, 0.0) + _amt
 
-                _mcrs_with_actuals = set(_monthly_by_mcr.keys()) | {k[0] for k in _monthly_by_key.keys()}
+                    _mcrs_with_actuals = set(_monthly_by_mcr.keys()) | {k[0] for k in _monthly_by_key.keys()}
 
                 # MCR expand/collapse state (only for MCRs that have task-level data)
                 _mcr_values = sorted(set(_src_df["Project MCR #"].astype(str).unique().tolist()))
@@ -8948,8 +8763,14 @@ elif page == "🔮 5. Manual Forecast Adjustment":
                         if _is_non_expandable:
                             # Non-expandable MCR: use MCR-level aggregation for all months
                             if _m < _current_ym:
-                                # Past months must be actuals-only in 5.1.
-                                _m_total = float(_monthly_by_mcr.get(_mcr, {}).get(_m, 0.0) or 0.0)
+                                # Past months: use actuals when present, otherwise fallback to plan.
+                                if _mcr in _mcrs_with_actuals:
+                                    _m_total = float(_monthly_by_mcr.get(_mcr, {}).get(_m, 0.0) or 0.0)
+                                else:
+                                    _m_total = 0.0
+                                    for _, _sr in _mdf.iterrows():
+                                        _tid = int(_sr.get("__task_id") or 0)
+                                        _m_total += float(_fc_vmap.get((_tid, _m), 0.0) or 0.0)
                             else:
                                 # Future months: sum plan values across all tasks for this MCR
                                 _m_total = 0.0
@@ -9419,7 +9240,7 @@ elif page == "🔮 5. Manual Forecast Adjustment":
                                 _total_plan += _default_val
                                 if _m < _current_ym:
                                     if _mcr_key not in _mcrs_with_actuals:
-                                        _actual_val = 0.0
+                                        _actual_val = _default_val
                                     elif _task_name_key in _task_name_actual_allocated_single:
                                         _actual_val = 0.0
                                     else:
@@ -10100,1300 +9921,1269 @@ elif page == "⚠️ 6. Financial risk":
         "approved": "Approved (reduces EAC)",
         "cancelled": "Cancelled (not reducing EAC)",
     }
-    _fr_status_labels = {
-        "identified": "Identified",
-        "planned": "Planned",
-        "approved": "Approved",
-        "cancelled": "Cancelled",
-    }
-    _fr_norm_status = _fr_norm_mitigation_status
     _fr_mitigation_status_by_label = {v: k for k, v in _fr_mitigation_status_labels.items()}
     _fr_eac_reducing_statuses = {"approved"}
 
-    with st.expander("🧾 6.1 Financial risk register", expanded=True):
-        st.caption("Define the risk itself here. Origin fields describe where the risk comes from; mitigation mappings are maintained separately in section 6.2.")
-        _risk_options = {"(new)": None}
-        for _r in _fr_rows_raw:
-            _risk_options[f"[{_r['id']}] {_r.get('risk_name') or ''}"] = int(_r["id"])
-        _risk_pick_label = st.selectbox(
-            "Select risk to edit",
-            list(_risk_options.keys()),
-            key=f"fr_risk_pick_{project_id}",
+    st.markdown("**6.1 Financial risk register**")
+    st.caption("Define the risk itself here. Origin fields describe where the risk comes from; mitigation mappings are maintained separately in section 6.2.")
+    _risk_options = {"(new)": None}
+    for _r in _fr_rows_raw:
+        _risk_options[f"[{_r['id']}] {_r.get('risk_name') or ''}"] = int(_r["id"])
+    _risk_pick_label = st.selectbox(
+        "Select risk to edit",
+        list(_risk_options.keys()),
+        key=f"fr_risk_pick_{project_id}",
+    )
+    _risk_pick_id = _risk_options[_risk_pick_label]
+    _risk_existing = next((r for r in _fr_rows_raw if int(r["id"]) == int(_risk_pick_id)), None) if _risk_pick_id else None
+
+    with st.form(key=f"fr_risk_form_{project_id}"):
+        _fr_c1, _fr_c2 = st.columns([2, 1])
+        _risk_name = _fr_c1.text_input("Financial risk (name)", value=str((_risk_existing or {}).get("risk_name") or ""))
+        _risk_amount = _fr_c2.number_input(
+            "Total Initial Amount (€)",
+            min_value=0.0,
+            step=0.01,
+            format="%.2f",
+            value=float((_risk_existing or {}).get("total_initial_amount") or 0.0),
         )
-        _risk_pick_id = _risk_options[_risk_pick_label]
-        _risk_existing = next((r for r in _fr_rows_raw if int(r["id"]) == int(_risk_pick_id)), None) if _risk_pick_id else None
-    
-        with st.form(key=f"fr_risk_form_{project_id}"):
-            _fr_c1, _fr_c2 = st.columns([2, 1])
-            _risk_name = _fr_c1.text_input("Financial risk (name)", value=str((_risk_existing or {}).get("risk_name") or ""))
-            _risk_amount = _fr_c2.number_input(
-                "Total Initial Amount (€)",
-                min_value=0.0,
-                step=0.01,
-                format="%.2f",
-                value=float((_risk_existing or {}).get("total_initial_amount") or 0.0),
+        _risk_desc = st.text_area("Description", value=str((_risk_existing or {}).get("description") or ""), height=80)
+        _risk_month_display = st.text_input(
+            "Month identified (MMM-YY)",
+            value=_fr_fmt_ym((_risk_existing or {}).get("month_identified_ym") or ""),
+            placeholder="Jan-26",
+        )
+        _risk_link_type_current = _fr_norm_link_type((_risk_existing or {}).get("link_type"))
+        _risk_link_labels = list(_fr_link_type_by_label.keys())
+        _risk_link_default_idx = _risk_link_labels.index(_fr_link_type_labels.get(_risk_link_type_current, "Standalone risk")) if _fr_link_type_labels.get(_risk_link_type_current, "Standalone risk") in _risk_link_labels else 0
+        _rl_c1, _rl_c2, _rl_c3 = st.columns([2, 2, 3])
+        _risk_link_label = _rl_c1.selectbox(
+            "Risk origin type",
+            _risk_link_labels,
+            index=_risk_link_default_idx,
+            key=f"fr_risk_link_type_{project_id}_{_risk_pick_id or 'new'}",
+        )
+        _risk_linked_mcr = _rl_c2.text_input(
+            "Origin MCR Project No.",
+            value=str((_risk_existing or {}).get("linked_mcr") or ""),
+            key=f"fr_risk_linked_mcr_{project_id}_{_risk_pick_id or 'new'}",
+        )
+        _risk_linked_task = _rl_c3.text_input(
+            "Origin task",
+            value=str((_risk_existing or {}).get("linked_task_name") or ""),
+            key=f"fr_risk_linked_task_{project_id}_{_risk_pick_id or 'new'}",
+        )
+
+        _save_risk = st.form_submit_button("Save risk")
+        if _save_risk:
+            _errors = []
+            _risk_name_s = str(_risk_name or "").strip()
+            _risk_ym = _fr_parse_month_input(_risk_month_display)
+            _risk_link_type = _fr_link_type_by_label.get(_risk_link_label, "standalone")
+            _risk_linked_mcr_s = str(_risk_linked_mcr or "").strip()
+            _risk_linked_task_s = str(_risk_linked_task or "").strip()
+            if not _risk_name_s:
+                _errors.append("Financial risk (name) is required.")
+            if float(_risk_amount or 0.0) <= 0:
+                _errors.append("Total Initial Amount must be greater than 0.")
+            if not _risk_ym:
+                _errors.append("Month identified must be a valid MMM-YY (example Jan-26).")
+            elif _fr_months and _risk_ym > _fr_months[-1]:
+                _errors.append("Month identified cannot be after project end month.")
+            if _risk_link_type == "existing_task" and (not _risk_linked_mcr_s or not _risk_linked_task_s):
+                _errors.append("Linked risks require both Linked MCR Project No. and Linked task.")
+            if _errors:
+                st.error(" ".join(_errors))
+            else:
+                if _risk_existing:
+                    db.update_financial_risk(
+                        _risk_existing["id"],
+                        _risk_name_s,
+                        _risk_amount,
+                        _risk_desc,
+                        _risk_ym,
+                        _risk_link_type,
+                        _risk_linked_mcr_s,
+                        _risk_linked_task_s,
+                    )
+                    st.success("Financial risk updated.")
+                else:
+                    db.create_financial_risk(
+                        project_id,
+                        _risk_name_s,
+                        _risk_amount,
+                        _risk_desc,
+                        _risk_ym,
+                        _risk_link_type,
+                        _risk_linked_mcr_s,
+                        _risk_linked_task_s,
+                    )
+                    st.success("Financial risk created.")
+                st.rerun()
+
+    _fr_mitigation_types_by_risk = {}
+    _fr_mapped_mcrs_by_risk = {}
+    _fr_mapped_tasks_by_risk = {}
+    for _m in _fr_map_rows:
+        _rid = int(_m.get("risk_id") or 0)
+        _mtype = _fr_norm_link_type(_m.get("mitigation_type") or "existing_task")
+        _fr_mitigation_types_by_risk.setdefault(_rid, set()).add(_mtype)
+        if _mtype == "existing_task":
+            _mapped_mcr = str(_m.get("mapped_mcr") or "").strip()
+            _mapped_task = str(_m.get("mapped_task_name") or "").strip()
+            if _mapped_mcr:
+                _fr_mapped_mcrs_by_risk.setdefault(_rid, set()).add(_mapped_mcr)
+            if _mapped_task:
+                _fr_mapped_tasks_by_risk.setdefault(_rid, set()).add(_mapped_task)
+
+    _fr_table_rows = []
+    for _rr in _fr_bundle.get("risk_rows", []):
+        _risk_id = int(_rr.get("id") or 0)
+        _total_initial_amount = float(_rr.get("total_initial_amount") or 0.0)
+        _remaining_amount = float(_rr.get("remaining_amount") or 0.0)
+        _origin_link_type = _fr_norm_link_type(_rr.get("link_type"))
+        _origin_link_label = _fr_link_type_labels.get(_origin_link_type, _fr_link_type_labels["standalone"])
+        _mitigation_types = sorted(_fr_mitigation_types_by_risk.get(_risk_id, set()))
+        if not _mitigation_types:
+            _mitigation_mapping_label = "None"
+        elif len(_mitigation_types) == 1:
+            _mitigation_mapping_label = _fr_mitigation_type_labels.get(_mitigation_types[0], _mitigation_types[0])
+        else:
+            _mitigation_mapping_label = "Mixed: " + ", ".join(_fr_mitigation_type_labels.get(_t, _t) for _t in _mitigation_types)
+        _origin_mcr_display = str(_rr.get("linked_mcr") or "").strip()
+        _origin_task_display = str(_rr.get("linked_task_name") or "").strip()
+
+        _row = {
+            "Financial risk": _rr.get("risk_name") or "",
+            "Description": _rr.get("description") or "",
+            "Origin link type": _origin_link_label,
+            "Mitigation mapping type": _mitigation_mapping_label,
+            "Origin MCR Project": _origin_mcr_display,
+            "Origin task": _origin_task_display,
+            "Total Initial Amount": _total_initial_amount,
+            "Month identified": _fr_fmt_ym(_rr.get("month_identified_ym") or ""),
+            "Risk status": _rr.get("risk_status") or "",
+            "EAC-reducing mitigation": float(_rr.get("eligible_mitigation_amount") or 0.0),
+            "Identified mitigation only": float(_rr.get("identified_mitigation_amount") or 0.0),
+        }
+        for _m in _fr_months:
+            _row[_m] = float((_rr.get("monthly") or {}).get(_m, 0.0) or 0.0)
+        _row["Remaining risk amount (Total)"] = _remaining_amount
+        _fr_table_rows.append(_row)
+
+    _show_fr_month_cols = st.toggle(
+        "Show monthly columns in risk summary",
+        value=False,
+        key=f"fr_show_month_cols_{project_id}",
+    )
+
+    if _fr_table_rows:
+        _fr_df = pd.DataFrame(_fr_table_rows)
+        _fr_month_cols = [m for m in _fr_months if m in _fr_df.columns]
+        _fr_base_cols = [
+            "Financial risk",
+            "Description",
+            "Origin link type",
+            "Origin MCR Project",
+            "Origin task",
+            "Mitigation mapping type",
+            "Total Initial Amount",
+            "Month identified",
+            "Risk status",
+            "EAC-reducing mitigation",
+            "Identified mitigation only",
+            "Remaining risk amount (Total)",
+        ]
+        _fr_display_cols = _fr_base_cols + (_fr_month_cols if _show_fr_month_cols else [])
+        _fr_df_view = _fr_df[_fr_display_cols].copy()
+        _fr_currency_cols = ["Total Initial Amount", "EAC-reducing mitigation", "Identified mitigation only", "Remaining risk amount (Total)"]
+        if _show_fr_month_cols:
+            _fr_currency_cols += _fr_month_cols
+
+        _fr_total_row = {c: "" for c in _fr_display_cols}
+        _fr_total_row["Financial risk"] = "TOTAL"
+        for _c in _fr_currency_cols:
+            _fr_total_row[_c] = _fr_df_view[_c].sum() if _c in _fr_df_view.columns else 0.0
+        _fr_df_with_total = pd.concat([_fr_df_view, pd.DataFrame([_fr_total_row])], ignore_index=True)
+        st.dataframe(
+            _fr_df_with_total,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                c: st.column_config.NumberColumn(format="€ %,.2f")
+                for c in _fr_currency_cols
+            },
+        )
+    else:
+        st.info("No financial risks yet.")
+
+    if _fr_rows_raw:
+        _del_risk_options = {f"[{r['id']}] {r.get('risk_name') or ''}": int(r["id"]) for r in _fr_rows_raw}
+        _dr_c1, _dr_c2 = st.columns([4, 1])
+        _del_risk_pick = _dr_c1.selectbox("Delete risk", list(_del_risk_options.keys()), key=f"fr_del_risk_pick_{project_id}")
+        _dr_c2.write("")
+        _dr_c2.write("")
+        if _dr_c2.button("Delete risk", key=f"fr_del_risk_btn_{project_id}"):
+            db.delete_financial_risk(_del_risk_options[_del_risk_pick])
+            st.success("Financial risk deleted.")
+            st.rerun()
+
+    st.markdown("**6.2 Financial risk mitigation**")
+    st.info(
+        "Use this section to link one financial risk to one or more mitigation lines. A single risk can be mitigated by multiple MCR/Task lines. "
+        "Only mitigations with status Approved reduce the risk amount used in EAC. "
+        "Planned and Identified mitigations remain visible as opportunity context but do not reduce EAC."
+    )
+    if not _fr_rows_raw:
+        st.info("Create at least one financial risk first.")
+    else:
+        _fr_name_by_id = {int(r["id"]): str(r.get("risk_name") or "") for r in _fr_rows_raw}
+        _map_risk_options = {f"[{r['id']}] {r.get('risk_name') or ''}": int(r["id"]) for r in _fr_rows_raw}
+        _map_risk_label = st.selectbox("Mitigate risk", list(_map_risk_options.keys()), key=f"fr_map_risk_{project_id}")
+        _map_risk_id = _map_risk_options[_map_risk_label]
+        _map_risk_row = next((r for r in _fr_rows_raw if int(r["id"]) == int(_map_risk_id)), None)
+        _map_existing = [m for m in _fr_map_rows if int(m.get("risk_id") or 0) == int(_map_risk_id)]
+
+        with st.form(key=f"fr_map_form_{project_id}"):
+            _fm_c0, _fm_c_status, _fm_c_effective = st.columns([2, 2, 1])
+            _map_type_labels = list(_fr_mitigation_type_by_label.keys())
+            _map_type_label = _fm_c0.selectbox(
+                "Mitigation type",
+                _map_type_labels,
+                index=_map_type_labels.index("Mitigation mapped to existing MCR task") if "Mitigation mapped to existing MCR task" in _map_type_labels else 0,
+                key=f"fr_map_type_{project_id}",
             )
-            _risk_desc = st.text_area("Description", value=str((_risk_existing or {}).get("description") or ""), height=80)
-            _risk_month_display = st.text_input(
-                "Month identified (MMM-YY)",
-                value=_fr_fmt_ym((_risk_existing or {}).get("month_identified_ym") or ""),
-                placeholder="Jan-26",
+            _map_status_label = _fm_c_status.selectbox(
+                "Mitigation status",
+                list(_fr_mitigation_status_by_label.keys()),
+                index=list(_fr_mitigation_status_by_label.keys()).index("Planned (opportunity only)"),
+                key=f"fr_map_status_{project_id}",
             )
-            _risk_link_type_current = _fr_norm_link_type((_risk_existing or {}).get("link_type"))
-            _risk_link_labels = list(_fr_link_type_by_label.keys())
-            _risk_link_default_idx = _risk_link_labels.index(_fr_link_type_labels.get(_risk_link_type_current, "Standalone risk")) if _fr_link_type_labels.get(_risk_link_type_current, "Standalone risk") in _risk_link_labels else 0
-            _rl_c1, _rl_c2, _rl_c3 = st.columns([2, 2, 3])
-            _risk_link_label = _rl_c1.selectbox(
-                "Risk origin type",
-                _risk_link_labels,
-                index=_risk_link_default_idx,
-                key=f"fr_risk_link_type_{project_id}_{_risk_pick_id or 'new'}",
-            )
-            _risk_linked_mcr = _rl_c2.text_input(
-                "Origin MCR Project No.",
-                value=str((_risk_existing or {}).get("linked_mcr") or ""),
-                key=f"fr_risk_linked_mcr_{project_id}_{_risk_pick_id or 'new'}",
-            )
-            _risk_linked_task = _rl_c3.text_input(
-                "Origin task",
-                value=str((_risk_existing or {}).get("linked_task_name") or ""),
-                key=f"fr_risk_linked_task_{project_id}_{_risk_pick_id or 'new'}",
-            )
-    
-            _save_risk = st.form_submit_button("Save risk")
-            if _save_risk:
+            _map_effective_month = _fm_c_effective.text_input("Effective month", value="", placeholder="Jan-26")
+            _fm_c1, _fm_c2, _fm_c3 = st.columns([2, 2, 1])
+            _map_mcr = _fm_c1.text_input("Mapping to MCR Project No.", value="")
+            _map_task = _fm_c2.text_input("Mapping to Task", value="")
+            _map_amount = _fm_c3.number_input("Covered amount (€)", min_value=0.0, step=0.01, format="%.2f", value=0.0)
+            _map_notes = st.text_area("Mitigation notes", value="", height=70)
+            _save_map = st.form_submit_button("Add mapping")
+            if _save_map:
                 _errors = []
-                _risk_name_s = str(_risk_name or "").strip()
-                _risk_ym = _fr_parse_month_input(_risk_month_display)
-                _risk_link_type = _fr_link_type_by_label.get(_risk_link_label, "standalone")
-                _risk_linked_mcr_s = str(_risk_linked_mcr or "").strip()
-                _risk_linked_task_s = str(_risk_linked_task or "").strip()
-                if not _risk_name_s:
-                    _errors.append("Financial risk (name) is required.")
-                if float(_risk_amount or 0.0) <= 0:
-                    _errors.append("Total Initial Amount must be greater than 0.")
-                if not _risk_ym:
-                    _errors.append("Month identified must be a valid MMM-YY (example Jan-26).")
-                elif _fr_months and _risk_ym > _fr_months[-1]:
-                    _errors.append("Month identified cannot be after project end month.")
-                if _risk_link_type == "existing_task" and (not _risk_linked_mcr_s or not _risk_linked_task_s):
-                    _errors.append("Linked risks require both Linked MCR Project No. and Linked task.")
+                _map_type = _fr_mitigation_type_by_label.get(_map_type_label, "existing_task")
+                _map_status = _fr_mitigation_status_by_label.get(_map_status_label, "planned")
+                _effective_ym = _fr_parse_month_input(_map_effective_month) if str(_map_effective_month or "").strip() else ""
+                _mcr = str(_map_mcr or "").strip()
+                _task = str(_map_task or "").strip()
+                _covered = round(float(_map_amount or 0.0), 2)
+                if _map_type == "existing_task" and not _mcr:
+                    _errors.append("Mapping to MCR Project No. is required.")
+                if _map_type == "existing_task" and not _task:
+                    _errors.append("Mapping to Task is required.")
+                if _covered <= 0:
+                    _errors.append("Covered amount must be greater than 0.")
+                if str(_map_effective_month or "").strip() and not _effective_ym:
+                    _errors.append("Effective month must be a valid MMM-YY (example Jan-26).")
+
+                _initial = round(float((_map_risk_row or {}).get("total_initial_amount") or 0.0), 2)
+                _already = round(sum(float(m.get("covered_amount") or 0.0) for m in _map_existing), 2)
+                if _already + _covered > _initial + 0.0001:
+                    _errors.append("Total covered amount cannot exceed Total Initial Amount.")
+
                 if _errors:
                     st.error(" ".join(_errors))
                 else:
-                    if _risk_existing:
-                        db.update_financial_risk(
-                            _risk_existing["id"],
-                            _risk_name_s,
-                            _risk_amount,
-                            _risk_desc,
-                            _risk_ym,
-                            _risk_link_type,
-                            _risk_linked_mcr_s,
-                            _risk_linked_task_s,
-                        )
-                        st.success("Financial risk updated.")
-                    else:
-                        db.create_financial_risk(
-                            project_id,
-                            _risk_name_s,
-                            _risk_amount,
-                            _risk_desc,
-                            _risk_ym,
-                            _risk_link_type,
-                            _risk_linked_mcr_s,
-                            _risk_linked_task_s,
-                        )
-                        st.success("Financial risk created.")
+                    db.create_financial_risk_mapping(
+                        project_id,
+                        _map_risk_id,
+                        _mcr,
+                        _task,
+                        _covered,
+                        _map_type,
+                        _map_status,
+                        _effective_ym,
+                        _map_notes,
+                    )
+                    st.success("Mapping added.")
                     st.rerun()
-    
-        _fr_mitigation_types_by_risk = {}
-        _fr_mappings_by_risk = {}
-        _fr_mapped_mcrs_by_risk = {}
-        _fr_mapped_tasks_by_risk = {}
-        for _m in _fr_map_rows:
-            _rid = int(_m.get("risk_id") or 0)
-            _fr_mappings_by_risk.setdefault(_rid, []).append(_m)
-            _mtype = _fr_norm_link_type(_m.get("mitigation_type") or "existing_task")
-            _fr_mitigation_types_by_risk.setdefault(_rid, set()).add(_mtype)
-            if _mtype == "existing_task":
-                _mapped_mcr = str(_m.get("mapped_mcr") or "").strip()
-                _mapped_task = str(_m.get("mapped_task_name") or "").strip()
-                if _mapped_mcr:
-                    _fr_mapped_mcrs_by_risk.setdefault(_rid, set()).add(_mapped_mcr)
-                if _mapped_task:
-                    _fr_mapped_tasks_by_risk.setdefault(_rid, set()).add(_mapped_task)
-    
-        _fr_table_rows = []
-        for _rr in _fr_bundle.get("risk_rows", []):
-            _risk_id = int(_rr.get("id") or 0)
-            _total_initial_amount = float(_rr.get("total_initial_amount") or 0.0)
-            _remaining_amount = float(_rr.get("remaining_amount") or 0.0)
-            _origin_link_type = _fr_norm_link_type(_rr.get("link_type"))
-            _origin_link_label = _fr_link_type_labels.get(_origin_link_type, _fr_link_type_labels["standalone"])
-            _mitigation_types = sorted(_fr_mitigation_types_by_risk.get(_risk_id, set()))
-            _approved_amount = float(_rr.get("eligible_mitigation_amount") or 0.0)
-            _identified_amount = float(_rr.get("identified_mitigation_amount") or 0.0)
-            if not _mitigation_types:
-                _mitigation_mapping_label = "None"
-            elif len(_mitigation_types) == 1:
-                _mitigation_mapping_label = _fr_mitigation_type_labels.get(_mitigation_types[0], _mitigation_types[0])
-            else:
-                _mitigation_mapping_label = "Mixed: " + ", ".join(_fr_mitigation_type_labels.get(_t, _t) for _t in _mitigation_types)
-            _origin_mcr_display = str(_rr.get("linked_mcr") or "").strip()
-            _origin_task_display = str(_rr.get("linked_task_name") or "").strip()
-            _coverage_items = []
-            for _m in _fr_mappings_by_risk.get(_risk_id, []):
-                _mcr_cov = _canonical_project_mcr(_m.get("mapped_mcr")) or "(blank)"
-                _task_cov = str(_m.get("mapped_task_name") or "").strip() or "(blank task)"
-                _status_cov = _fr_status_labels.get(_fr_norm_status(_m.get("mitigation_status")), "Planned")
-                _amount_cov = float(_m.get("covered_amount") or 0.0)
-                _coverage_items.append(f"{_mcr_cov} / {_task_cov}: {_status_cov} (€ {_amount_cov:,.0f})")
-            _coverage_max_items = 2
-            if _coverage_items:
-                _coverage_shown = _coverage_items[:_coverage_max_items]
-                _coverage_more = max(len(_coverage_items) - _coverage_max_items, 0)
-                _coverage_detail = "; ".join(_coverage_shown)
-                if _coverage_more > 0:
-                    _coverage_detail += f"; +{_coverage_more} more"
-            else:
-                _coverage_detail = "No mapped mitigation actions"
-            _mitigation_coverage = f"€ {_approved_amount:,.0f} approved + € {_identified_amount:,.0f} planned/identified; {_coverage_detail} -> € {_remaining_amount:,.0f} remaining"
-    
-            _row = {
-                "Financial risk": _rr.get("risk_name") or "",
-                "Description": _rr.get("description") or "",
-                "Origin link type": _origin_link_label,
-                "Mitigation mapping type": _mitigation_mapping_label,
-                "Origin MCR Project": _origin_mcr_display,
-                "Origin task": _origin_task_display,
-                "Total Initial Amount": _total_initial_amount,
-                "Month identified": _fr_fmt_ym(_rr.get("month_identified_ym") or ""),
-                "Risk status": _rr.get("risk_status") or "",
-                "EAC-reducing mitigation": float(_rr.get("eligible_mitigation_amount") or 0.0),
-                "Identified mitigation only": float(_rr.get("identified_mitigation_amount") or 0.0),
-                "Mitigation coverage": _mitigation_coverage,
+
+        if _fr_map_rows:
+            st.markdown("Edit existing risk mitigation")
+            _edit_map_options = {
+                f"[{int(m.get('id') or 0)}] {_fr_name_by_id.get(int(m.get('risk_id') or 0), '')} | {m.get('mapped_mcr') or ''} | {m.get('mapped_task_name') or ''}": int(m.get("id") or 0)
+                for m in _fr_map_rows
             }
-            for _m in _fr_months:
-                _row[_m] = float((_rr.get("monthly") or {}).get(_m, 0.0) or 0.0)
-            _row["Remaining risk amount (Total)"] = _remaining_amount
-            _fr_table_rows.append(_row)
-    
-        _show_fr_month_cols = st.toggle(
-            "Show monthly columns in risk summary",
-            value=False,
-            key=f"fr_show_month_cols_{project_id}",
-        )
-    
-        if _fr_table_rows:
-            _fr_df = pd.DataFrame(_fr_table_rows)
-            _fr_month_cols = [m for m in _fr_months if m in _fr_df.columns]
-            _fr_base_cols = [
-                "Financial risk",
-                "Description",
-                "Origin link type",
-                "Origin MCR Project",
-                "Origin task",
-                "Mitigation mapping type",
-                "Total Initial Amount",
-                "Month identified",
-                "Risk status",
-                "EAC-reducing mitigation",
-                "Identified mitigation only",
-                "Mitigation coverage",
-                "Remaining risk amount (Total)",
-            ]
-            _fr_display_cols = _fr_base_cols + (_fr_month_cols if _show_fr_month_cols else [])
-            _fr_df_view = _fr_df[_fr_display_cols].copy()
-            _fr_currency_cols = ["Total Initial Amount", "EAC-reducing mitigation", "Identified mitigation only", "Remaining risk amount (Total)"]
-            if _show_fr_month_cols:
-                _fr_currency_cols += _fr_month_cols
-    
-            _fr_total_row = {c: "" for c in _fr_display_cols}
-            _fr_total_row["Financial risk"] = "TOTAL"
-            for _c in _fr_currency_cols:
-                _fr_total_row[_c] = _fr_df_view[_c].sum() if _c in _fr_df_view.columns else 0.0
-            _fr_df_with_total = pd.concat([_fr_df_view, pd.DataFrame([_fr_total_row])], ignore_index=True)
-            st.dataframe(
-                _fr_df_with_total,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    c: st.column_config.NumberColumn(format="€ %,.2f")
-                    for c in _fr_currency_cols
-                },
+            _edit_map_pick = st.selectbox(
+                "Select mitigation to edit",
+                list(_edit_map_options.keys()),
+                key=f"fr_edit_map_pick_{project_id}",
             )
-        else:
-            st.info("No financial risks yet.")
-    
-        if _fr_rows_raw:
-            _del_risk_options = {f"[{r['id']}] {r.get('risk_name') or ''}": int(r["id"]) for r in _fr_rows_raw}
-            _dr_c1, _dr_c2 = st.columns([4, 1])
-            _del_risk_pick = _dr_c1.selectbox("Delete risk", list(_del_risk_options.keys()), key=f"fr_del_risk_pick_{project_id}")
-            _dr_c2.write("")
-            _dr_c2.write("")
-            if _dr_c2.button("Delete risk", key=f"fr_del_risk_btn_{project_id}"):
-                db.delete_financial_risk(_del_risk_options[_del_risk_pick])
-                st.success("Financial risk deleted.")
-                st.rerun()
-    
-    with st.expander("🔗 6.2 Coverage mappings", expanded=True):
-        st.info(
-            "Use this section to link one financial risk to one or more mitigation lines. A single risk can be mitigated by multiple MCR/Task lines. "
-            "Only mitigations with status Approved reduce the risk amount used in EAC. "
-            "Planned and Identified mitigations remain visible as opportunity context but do not reduce EAC."
-        )
-        if not _fr_rows_raw:
-            st.info("Create at least one financial risk first.")
-        else:
-            _fr_name_by_id = {int(r["id"]): str(r.get("risk_name") or "") for r in _fr_rows_raw}
-            _map_risk_options = {f"[{r['id']}] {r.get('risk_name') or ''}": int(r["id"]) for r in _fr_rows_raw}
-            _map_risk_label = st.selectbox("Mitigate risk", list(_map_risk_options.keys()), key=f"fr_map_risk_{project_id}")
-            _map_risk_id = _map_risk_options[_map_risk_label]
-            _map_risk_row = next((r for r in _fr_rows_raw if int(r["id"]) == int(_map_risk_id)), None)
-            _map_existing = [m for m in _fr_map_rows if int(m.get("risk_id") or 0) == int(_map_risk_id)]
-    
-            with st.form(key=f"fr_map_form_{project_id}"):
-                _fm_c0, _fm_c_status, _fm_c_effective = st.columns([2, 2, 1])
-                _map_type_labels = list(_fr_mitigation_type_by_label.keys())
-                _map_type_label = _fm_c0.selectbox(
-                    "Mitigation type",
-                    _map_type_labels,
-                    index=_map_type_labels.index("Mitigation mapped to existing MCR task") if "Mitigation mapped to existing MCR task" in _map_type_labels else 0,
-                    key=f"fr_map_type_{project_id}",
-                )
-                _map_status_label = _fm_c_status.selectbox(
-                    "Mitigation status",
-                    list(_fr_mitigation_status_by_label.keys()),
-                    index=list(_fr_mitigation_status_by_label.keys()).index("Planned (opportunity only)"),
-                    key=f"fr_map_status_{project_id}",
-                )
-                _map_effective_month = _fm_c_effective.text_input("Effective month", value="", placeholder="Jan-26")
-                _fm_c1, _fm_c2, _fm_c3 = st.columns([2, 2, 1])
-                _map_mcr = _fm_c1.text_input("Mapping to MCR Project No.", value="")
-                _map_task = _fm_c2.text_input("Mapping to Task", value="")
-                _map_amount = _fm_c3.number_input("Covered amount (€)", min_value=0.0, step=0.01, format="%.2f", value=0.0)
-                _map_notes = st.text_area("Mitigation notes", value="", height=70)
-                _save_map = st.form_submit_button("Add mapping")
-                if _save_map:
-                    _errors = []
-                    _map_type = _fr_mitigation_type_by_label.get(_map_type_label, "existing_task")
-                    _map_status = _fr_mitigation_status_by_label.get(_map_status_label, "planned")
-                    _effective_ym = _fr_parse_month_input(_map_effective_month) if str(_map_effective_month or "").strip() else ""
-                    _mcr = str(_map_mcr or "").strip()
-                    _task = str(_map_task or "").strip()
-                    _covered = round(float(_map_amount or 0.0), 2)
-                    if _map_type == "existing_task" and not _mcr:
-                        _errors.append("Mapping to MCR Project No. is required.")
-                    if _map_type == "existing_task" and not _task:
-                        _errors.append("Mapping to Task is required.")
-                    if _covered <= 0:
-                        _errors.append("Covered amount must be greater than 0.")
-                    if str(_map_effective_month or "").strip() and not _effective_ym:
-                        _errors.append("Effective month must be a valid MMM-YY (example Jan-26).")
-    
-                    _initial = round(float((_map_risk_row or {}).get("total_initial_amount") or 0.0), 2)
-                    _already = round(sum(float(m.get("covered_amount") or 0.0) for m in _map_existing), 2)
-                    if _already + _covered > _initial + 0.0001:
-                        _errors.append("Total covered amount cannot exceed Total Initial Amount.")
-    
-                    if _errors:
-                        st.error(" ".join(_errors))
-                    else:
-                        db.create_financial_risk_mapping(
-                            project_id,
-                            _map_risk_id,
-                            _mcr,
-                            _task,
-                            _covered,
-                            _map_type,
-                            _map_status,
-                            _effective_ym,
-                            _map_notes,
+            _edit_mapping_id = _edit_map_options[_edit_map_pick]
+            _edit_existing = next((m for m in _fr_map_rows if int(m.get("id") or 0) == int(_edit_mapping_id)), None)
+
+            if _edit_existing:
+                _edit_risk_options = {f"[{r['id']}] {r.get('risk_name') or ''}": int(r["id"]) for r in _fr_rows_raw}
+                _edit_current_risk_id = int(_edit_existing.get("risk_id") or 0)
+                _edit_risk_labels = list(_edit_risk_options.keys())
+                _edit_default_risk_idx = 0
+                for _idx, _label in enumerate(_edit_risk_labels):
+                    if int(_edit_risk_options[_label]) == _edit_current_risk_id:
+                        _edit_default_risk_idx = _idx
+                        break
+
+                with st.form(key=f"fr_edit_map_form_{project_id}_{_edit_mapping_id}"):
+                    _em_risk_label = st.selectbox(
+                        "Financial risk",
+                        _edit_risk_labels,
+                        index=_edit_default_risk_idx,
+                        key=f"fr_edit_map_risk_{project_id}_{_edit_mapping_id}",
+                    )
+                    _edit_type_current = str(_edit_existing.get("mitigation_type") or "existing_task").strip() or "existing_task"
+                    _edit_type_labels = list(_fr_mitigation_type_by_label.keys())
+                    _edit_type_default_label = _fr_mitigation_type_labels.get(_edit_type_current, "Mitigation mapped to existing MCR task")
+                    _edit_type_default_idx = _edit_type_labels.index(_edit_type_default_label) if _edit_type_default_label in _edit_type_labels else 0
+                    _edit_status_current = _fr_norm_mitigation_status(_edit_existing.get("mitigation_status"))
+                    _edit_status_labels = list(_fr_mitigation_status_by_label.keys())
+                    _edit_status_default_idx = _edit_status_labels.index(_fr_mitigation_status_labels.get(_edit_status_current, "Planned (opportunity only)")) if _fr_mitigation_status_labels.get(_edit_status_current, "Planned (opportunity only)") in _edit_status_labels else 1
+                    _em_meta_c1, _em_meta_c2, _em_meta_c3 = st.columns([2, 2, 1])
+                    _edit_type_label = _em_meta_c1.selectbox(
+                        "Mitigation type",
+                        _edit_type_labels,
+                        index=_edit_type_default_idx,
+                        key=f"fr_edit_map_type_{project_id}_{_edit_mapping_id}",
+                    )
+                    _edit_status_label = _em_meta_c2.selectbox(
+                        "Mitigation status",
+                        _edit_status_labels,
+                        index=_edit_status_default_idx,
+                        key=f"fr_edit_map_status_{project_id}_{_edit_mapping_id}",
+                    )
+                    _edit_effective_month = _em_meta_c3.text_input(
+                        "Effective month",
+                        value=_fr_fmt_ym(_edit_existing.get("effective_month_ym") or ""),
+                        placeholder="Jan-26",
+                        key=f"fr_edit_map_effective_{project_id}_{_edit_mapping_id}",
+                    )
+                    _em_c1, _em_c2, _em_c3 = st.columns([2, 2, 1])
+                    _edit_mcr = _em_c1.text_input(
+                        "Mapping to MCR Project No.",
+                        value=str(_edit_existing.get("mapped_mcr") or ""),
+                        key=f"fr_edit_map_mcr_{project_id}_{_edit_mapping_id}",
+                    )
+                    _edit_task = _em_c2.text_input(
+                        "Mapping to Task",
+                        value=str(_edit_existing.get("mapped_task_name") or ""),
+                        key=f"fr_edit_map_task_{project_id}_{_edit_mapping_id}",
+                    )
+                    _edit_amount = _em_c3.number_input(
+                        "Covered amount (€)",
+                        min_value=0.0,
+                        step=0.01,
+                        format="%.2f",
+                        value=float(_edit_existing.get("covered_amount") or 0.0),
+                        key=f"fr_edit_map_amount_{project_id}_{_edit_mapping_id}",
+                    )
+                    _edit_notes = st.text_area(
+                        "Mitigation notes",
+                        value=str(_edit_existing.get("notes") or ""),
+                        height=70,
+                        key=f"fr_edit_map_notes_{project_id}_{_edit_mapping_id}",
+                    )
+                    _save_edit_map = st.form_submit_button("Save mitigation changes")
+                    if _save_edit_map:
+                        _errors = []
+                        _edit_risk_id = _edit_risk_options[_em_risk_label]
+                        _edit_type = _fr_mitigation_type_by_label.get(_edit_type_label, "existing_task")
+                        _edit_status = _fr_mitigation_status_by_label.get(_edit_status_label, "planned")
+                        _edit_effective_ym = _fr_parse_month_input(_edit_effective_month) if str(_edit_effective_month or "").strip() else ""
+                        _mcr = str(_edit_mcr or "").strip()
+                        _task = str(_edit_task or "").strip()
+                        _covered = round(float(_edit_amount or 0.0), 2)
+                        if _edit_type == "existing_task" and not _mcr:
+                            _errors.append("Mapping to MCR Project No. is required.")
+                        if _edit_type == "existing_task" and not _task:
+                            _errors.append("Mapping to Task is required.")
+                        if _covered <= 0:
+                            _errors.append("Covered amount must be greater than 0.")
+                        if str(_edit_effective_month or "").strip() and not _edit_effective_ym:
+                            _errors.append("Effective month must be a valid MMM-YY (example Jan-26).")
+
+                        _target_risk_row = next((r for r in _fr_rows_raw if int(r["id"]) == int(_edit_risk_id)), None)
+                        _initial = round(float((_target_risk_row or {}).get("total_initial_amount") or 0.0), 2)
+                        _already = round(
+                            sum(
+                                float(m.get("covered_amount") or 0.0)
+                                for m in _fr_map_rows
+                                if int(m.get("risk_id") or 0) == int(_edit_risk_id)
+                                and int(m.get("id") or 0) != int(_edit_mapping_id)
+                            ),
+                            2,
                         )
-                        st.success("Mapping added.")
-                        st.rerun()
-    
-            if _fr_map_rows:
-                st.markdown("Edit existing risk mitigation")
-                _edit_map_options = {
-                    f"[{int(m.get('id') or 0)}] {_fr_name_by_id.get(int(m.get('risk_id') or 0), '')} | {m.get('mapped_mcr') or ''} | {m.get('mapped_task_name') or ''}": int(m.get("id") or 0)
-                    for m in _fr_map_rows
-                }
-                _edit_map_pick = st.selectbox(
-                    "Select mitigation to edit",
-                    list(_edit_map_options.keys()),
-                    key=f"fr_edit_map_pick_{project_id}",
-                )
-                _edit_mapping_id = _edit_map_options[_edit_map_pick]
-                _edit_existing = next((m for m in _fr_map_rows if int(m.get("id") or 0) == int(_edit_mapping_id)), None)
-    
-                if _edit_existing:
-                    _edit_risk_options = {f"[{r['id']}] {r.get('risk_name') or ''}": int(r["id"]) for r in _fr_rows_raw}
-                    _edit_current_risk_id = int(_edit_existing.get("risk_id") or 0)
-                    _edit_risk_labels = list(_edit_risk_options.keys())
-                    _edit_default_risk_idx = 0
-                    for _idx, _label in enumerate(_edit_risk_labels):
-                        if int(_edit_risk_options[_label]) == _edit_current_risk_id:
-                            _edit_default_risk_idx = _idx
-                            break
-    
-                    with st.form(key=f"fr_edit_map_form_{project_id}_{_edit_mapping_id}"):
-                        _em_risk_label = st.selectbox(
-                            "Financial risk",
-                            _edit_risk_labels,
-                            index=_edit_default_risk_idx,
-                            key=f"fr_edit_map_risk_{project_id}_{_edit_mapping_id}",
-                        )
-                        _edit_type_current = str(_edit_existing.get("mitigation_type") or "existing_task").strip() or "existing_task"
-                        _edit_type_labels = list(_fr_mitigation_type_by_label.keys())
-                        _edit_type_default_label = _fr_mitigation_type_labels.get(_edit_type_current, "Mitigation mapped to existing MCR task")
-                        _edit_type_default_idx = _edit_type_labels.index(_edit_type_default_label) if _edit_type_default_label in _edit_type_labels else 0
-                        _edit_status_current = _fr_norm_mitigation_status(_edit_existing.get("mitigation_status"))
-                        _edit_status_labels = list(_fr_mitigation_status_by_label.keys())
-                        _edit_status_default_idx = _edit_status_labels.index(_fr_mitigation_status_labels.get(_edit_status_current, "Planned (opportunity only)")) if _fr_mitigation_status_labels.get(_edit_status_current, "Planned (opportunity only)") in _edit_status_labels else 1
-                        _em_meta_c1, _em_meta_c2, _em_meta_c3 = st.columns([2, 2, 1])
-                        _edit_type_label = _em_meta_c1.selectbox(
-                            "Mitigation type",
-                            _edit_type_labels,
-                            index=_edit_type_default_idx,
-                            key=f"fr_edit_map_type_{project_id}_{_edit_mapping_id}",
-                        )
-                        _edit_status_label = _em_meta_c2.selectbox(
-                            "Mitigation status",
-                            _edit_status_labels,
-                            index=_edit_status_default_idx,
-                            key=f"fr_edit_map_status_{project_id}_{_edit_mapping_id}",
-                        )
-                        _edit_effective_month = _em_meta_c3.text_input(
-                            "Effective month",
-                            value=_fr_fmt_ym(_edit_existing.get("effective_month_ym") or ""),
-                            placeholder="Jan-26",
-                            key=f"fr_edit_map_effective_{project_id}_{_edit_mapping_id}",
-                        )
-                        _em_c1, _em_c2, _em_c3 = st.columns([2, 2, 1])
-                        _edit_mcr = _em_c1.text_input(
-                            "Mapping to MCR Project No.",
-                            value=str(_edit_existing.get("mapped_mcr") or ""),
-                            key=f"fr_edit_map_mcr_{project_id}_{_edit_mapping_id}",
-                        )
-                        _edit_task = _em_c2.text_input(
-                            "Mapping to Task",
-                            value=str(_edit_existing.get("mapped_task_name") or ""),
-                            key=f"fr_edit_map_task_{project_id}_{_edit_mapping_id}",
-                        )
-                        _edit_amount = _em_c3.number_input(
-                            "Covered amount (€)",
-                            min_value=0.0,
-                            step=0.01,
-                            format="%.2f",
-                            value=float(_edit_existing.get("covered_amount") or 0.0),
-                            key=f"fr_edit_map_amount_{project_id}_{_edit_mapping_id}",
-                        )
-                        _edit_notes = st.text_area(
-                            "Mitigation notes",
-                            value=str(_edit_existing.get("notes") or ""),
-                            height=70,
-                            key=f"fr_edit_map_notes_{project_id}_{_edit_mapping_id}",
-                        )
-                        _save_edit_map = st.form_submit_button("Save mitigation changes")
-                        if _save_edit_map:
-                            _errors = []
-                            _edit_risk_id = _edit_risk_options[_em_risk_label]
-                            _edit_type = _fr_mitigation_type_by_label.get(_edit_type_label, "existing_task")
-                            _edit_status = _fr_mitigation_status_by_label.get(_edit_status_label, "planned")
-                            _edit_effective_ym = _fr_parse_month_input(_edit_effective_month) if str(_edit_effective_month or "").strip() else ""
-                            _mcr = str(_edit_mcr or "").strip()
-                            _task = str(_edit_task or "").strip()
-                            _covered = round(float(_edit_amount or 0.0), 2)
-                            if _edit_type == "existing_task" and not _mcr:
-                                _errors.append("Mapping to MCR Project No. is required.")
-                            if _edit_type == "existing_task" and not _task:
-                                _errors.append("Mapping to Task is required.")
-                            if _covered <= 0:
-                                _errors.append("Covered amount must be greater than 0.")
-                            if str(_edit_effective_month or "").strip() and not _edit_effective_ym:
-                                _errors.append("Effective month must be a valid MMM-YY (example Jan-26).")
-    
-                            _target_risk_row = next((r for r in _fr_rows_raw if int(r["id"]) == int(_edit_risk_id)), None)
-                            _initial = round(float((_target_risk_row or {}).get("total_initial_amount") or 0.0), 2)
-                            _already = round(
-                                sum(
-                                    float(m.get("covered_amount") or 0.0)
-                                    for m in _fr_map_rows
-                                    if int(m.get("risk_id") or 0) == int(_edit_risk_id)
-                                    and int(m.get("id") or 0) != int(_edit_mapping_id)
-                                ),
-                                2,
+                        if _already + _covered > _initial + 0.0001:
+                            _errors.append("Total covered amount cannot exceed Total Initial Amount.")
+
+                        if _errors:
+                            st.error(" ".join(_errors))
+                        else:
+                            db.update_financial_risk_mapping(
+                                _edit_mapping_id,
+                                _edit_risk_id,
+                                _mcr,
+                                _task,
+                                _covered,
+                                _edit_type,
+                                _edit_status,
+                                _edit_effective_ym,
+                                _edit_notes,
                             )
-                            if _already + _covered > _initial + 0.0001:
-                                _errors.append("Total covered amount cannot exceed Total Initial Amount.")
-    
-                            if _errors:
-                                st.error(" ".join(_errors))
-                            else:
-                                db.update_financial_risk_mapping(
-                                    _edit_mapping_id,
-                                    _edit_risk_id,
-                                    _mcr,
-                                    _task,
-                                    _covered,
-                                    _edit_type,
-                                    _edit_status,
-                                    _edit_effective_ym,
-                                    _edit_notes,
-                                )
-                                st.success("Risk mitigation updated.")
-                                st.rerun()
-    
-            st.markdown("All risk mitigations")
-            st.caption("Risk rows show the risk origin from 6.1. Expanded child rows show mitigation mappings from 6.2.")
-            _risk_expand_key = f"fr_mitigation_expanded_{project_id}"
-            if _risk_expand_key not in st.session_state:
+                            st.success("Risk mitigation updated.")
+                            st.rerun()
+
+        st.markdown("All risk mitigations")
+        st.caption("Risk rows show the risk origin from 6.1. Expanded child rows show mitigation mappings from 6.2.")
+        _risk_expand_key = f"fr_mitigation_expanded_{project_id}"
+        if _risk_expand_key not in st.session_state:
+            st.session_state[_risk_expand_key] = {}
+
+        _risk_ids = [int(r.get("id") or 0) for r in _fr_rows_raw]
+        if _risk_ids:
+            _ex_c1, _ex_c2, _ex_c3, _ex_c4 = st.columns([3, 1, 1, 1])
+            _risk_toggle_options = {
+                f"[{int(r.get('id') or 0)}] {r.get('risk_name') or ''}": int(r.get("id") or 0)
+                for r in _fr_rows_raw
+            }
+            _toggle_label = _ex_c1.selectbox(
+                "Risk drill-down",
+                list(_risk_toggle_options.keys()),
+                key=f"{_risk_expand_key}__pick",
+            )
+            if _ex_c2.button("Toggle", key=f"{_risk_expand_key}__toggle"):
+                _rid = _risk_toggle_options[_toggle_label]
+                _expanded = dict(st.session_state[_risk_expand_key])
+                _expanded[_rid] = not bool(_expanded.get(_rid, False))
+                st.session_state[_risk_expand_key] = _expanded
+                st.rerun()
+            if _ex_c3.button("Expand All", key=f"{_risk_expand_key}__expand_all"):
+                st.session_state[_risk_expand_key] = {rid: True for rid in _risk_ids}
+                st.rerun()
+            if _ex_c4.button("Collapse All", key=f"{_risk_expand_key}__collapse_all"):
                 st.session_state[_risk_expand_key] = {}
-    
-            _risk_ids = [int(r.get("id") or 0) for r in _fr_rows_raw]
-            if _risk_ids:
-                _ex_c1, _ex_c2, _ex_c3, _ex_c4 = st.columns([3, 1, 1, 1])
-                _risk_toggle_options = {
-                    f"[{int(r.get('id') or 0)}] {r.get('risk_name') or ''}": int(r.get("id") or 0)
-                    for r in _fr_rows_raw
-                }
-                _toggle_label = _ex_c1.selectbox(
-                    "Risk drill-down",
-                    list(_risk_toggle_options.keys()),
-                    key=f"{_risk_expand_key}__pick",
-                )
-                if _ex_c2.button("Toggle", key=f"{_risk_expand_key}__toggle"):
-                    _rid = _risk_toggle_options[_toggle_label]
-                    _expanded = dict(st.session_state[_risk_expand_key])
-                    _expanded[_rid] = not bool(_expanded.get(_rid, False))
-                    st.session_state[_risk_expand_key] = _expanded
-                    st.rerun()
-                if _ex_c3.button("Expand All", key=f"{_risk_expand_key}__expand_all"):
-                    st.session_state[_risk_expand_key] = {rid: True for rid in _risk_ids}
-                    st.rerun()
-                if _ex_c4.button("Collapse All", key=f"{_risk_expand_key}__collapse_all"):
-                    st.session_state[_risk_expand_key] = {}
-                    st.rerun()
-    
-            _maps_by_risk = {}
-            for m in _fr_map_rows:
-                _maps_by_risk.setdefault(int(m.get("risk_id") or 0), []).append(m)
-    
-            _mitigation_rows = []
-            _risk_initial_total = 0.0
-            _risk_covered_total = 0.0
-            _risk_identified_total = 0.0
-            _risk_remaining_total = 0.0
-            for _rr in _fr_bundle.get("risk_rows", []):
-                _rid = int(_rr.get("id") or 0)
-                _initial = float(_rr.get("total_initial_amount") or 0.0)
-                _remaining = float(_rr.get("remaining_amount") or 0.0)
-                _covered = float(_rr.get("eligible_mitigation_amount") or max(0.0, _initial - _remaining))
-                _identified_only = float(_rr.get("identified_mitigation_amount") or 0.0)
-                _risk_initial_total += _initial
-                _risk_covered_total += _covered
-                _risk_identified_total += _identified_only
-                _risk_remaining_total += _remaining
-                _is_expanded = bool(st.session_state[_risk_expand_key].get(_rid, False))
-                _risk_name = str(_rr.get("risk_name") or "").strip() or f"Risk #{_rid}"
-                _risk_mappings = _maps_by_risk.get(_rid, [])
-                _prefix = "▼" if _is_expanded and _risk_mappings else ("▶" if _risk_mappings else "")
-                _risk_label = f"{_prefix} {_risk_name}".strip()
-                _risk_status_raw = str(_rr.get("risk_status") or "").strip().lower()
-                if _risk_status_raw == "fully covered":
-                    _risk_status_label = "✅ Fully covered"
-                elif _risk_status_raw == "partially covered":
-                    _risk_status_label = "🟡 Partially covered"
-                else:
-                    _risk_status_label = "🔴 Not covered"
-                _mitigation_rows.append(
-                    {
-                        "Financial risk": _risk_label,
-                        "Link type": _fr_link_type_labels.get(_fr_norm_link_type(_rr.get("link_type")), _fr_link_type_labels["standalone"]),
-                        "MCR Project": "",
-                        "Task": "",
-                        "Initial risk amount": _initial,
-                        "EAC-reducing mitigation": _covered,
-                        "Identified mitigation only": _identified_only,
-                        "Remaining amount": _remaining,
-                        "Risk status": _risk_status_label,
-                        "Mitigation status": "",
-                        "Effective month": "",
-                        "Notes": "",
-                    }
-                )
-                if _is_expanded:
-                    for _m in _risk_mappings:
-                        _mit_status = _fr_norm_mitigation_status(_m.get("mitigation_status"))
-                        _is_eac_reducing = _mit_status in _fr_eac_reducing_statuses
-                        _mit_amount = float(_m.get("covered_amount") or 0.0)
-                        _mitigation_rows.append(
-                            {
-                                "Financial risk": "    ↳ Covered by",
-                                "Link type": _fr_mitigation_type_labels.get(_fr_norm_link_type(_m.get("mitigation_type") or "existing_task"), "Mitigation mapped to existing MCR task"),
-                                "MCR Project": str(_m.get("mapped_mcr") or ""),
-                                "Task": str(_m.get("mapped_task_name") or ""),
-                                "Initial risk amount": None,
-                                "EAC-reducing mitigation": _mit_amount if _is_eac_reducing else 0.0,
-                                "Identified mitigation only": 0.0 if _is_eac_reducing else _mit_amount,
-                                "Remaining amount": None,
-                                "Risk status": "",
-                                "Mitigation status": _fr_mitigation_status_labels.get(_mit_status, _mit_status),
-                                "Effective month": _fr_fmt_ym(_m.get("effective_month_ym") or ""),
-                                "Notes": str(_m.get("notes") or ""),
-                            }
-                        )
-    
-            if _mitigation_rows:
-                _mitigation_total = {
-                    "Financial risk": "TOTAL",
-                    "Link type": "",
+                st.rerun()
+
+        _maps_by_risk = {}
+        for m in _fr_map_rows:
+            _maps_by_risk.setdefault(int(m.get("risk_id") or 0), []).append(m)
+
+        _mitigation_rows = []
+        _risk_initial_total = 0.0
+        _risk_covered_total = 0.0
+        _risk_identified_total = 0.0
+        _risk_remaining_total = 0.0
+        for _rr in _fr_bundle.get("risk_rows", []):
+            _rid = int(_rr.get("id") or 0)
+            _initial = float(_rr.get("total_initial_amount") or 0.0)
+            _remaining = float(_rr.get("remaining_amount") or 0.0)
+            _covered = float(_rr.get("eligible_mitigation_amount") or max(0.0, _initial - _remaining))
+            _identified_only = float(_rr.get("identified_mitigation_amount") or 0.0)
+            _risk_initial_total += _initial
+            _risk_covered_total += _covered
+            _risk_identified_total += _identified_only
+            _risk_remaining_total += _remaining
+            _is_expanded = bool(st.session_state[_risk_expand_key].get(_rid, False))
+            _risk_name = str(_rr.get("risk_name") or "").strip() or f"Risk #{_rid}"
+            _risk_mappings = _maps_by_risk.get(_rid, [])
+            _prefix = "▼" if _is_expanded and _risk_mappings else ("▶" if _risk_mappings else "")
+            _risk_label = f"{_prefix} {_risk_name}".strip()
+            _risk_status_raw = str(_rr.get("risk_status") or "").strip().lower()
+            if _risk_status_raw == "fully covered":
+                _risk_status_label = "✅ Fully covered"
+            elif _risk_status_raw == "partially covered":
+                _risk_status_label = "🟡 Partially covered"
+            else:
+                _risk_status_label = "🔴 Not covered"
+            _mitigation_rows.append(
+                {
+                    "Financial risk": _risk_label,
+                    "Link type": _fr_link_type_labels.get(_fr_norm_link_type(_rr.get("link_type")), _fr_link_type_labels["standalone"]),
                     "MCR Project": "",
                     "Task": "",
-                    "Initial risk amount": _risk_initial_total,
-                    "EAC-reducing mitigation": _risk_covered_total,
-                    "Identified mitigation only": _risk_identified_total,
-                    "Remaining amount": _risk_remaining_total,
-                    "Risk status": "",
+                    "Initial risk amount": _initial,
+                    "EAC-reducing mitigation": _covered,
+                    "Identified mitigation only": _identified_only,
+                    "Remaining amount": _remaining,
+                    "Risk status": _risk_status_label,
                     "Mitigation status": "",
                     "Effective month": "",
                     "Notes": "",
                 }
-                _mitigation_df = pd.DataFrame(_mitigation_rows + [_mitigation_total])
+            )
+            if _is_expanded:
+                for _m in _risk_mappings:
+                    _mit_status = _fr_norm_mitigation_status(_m.get("mitigation_status"))
+                    _is_eac_reducing = _mit_status in _fr_eac_reducing_statuses
+                    _mit_amount = float(_m.get("covered_amount") or 0.0)
+                    _mitigation_rows.append(
+                        {
+                            "Financial risk": "    ↳ Covered by",
+                            "Link type": _fr_mitigation_type_labels.get(_fr_norm_link_type(_m.get("mitigation_type") or "existing_task"), "Mitigation mapped to existing MCR task"),
+                            "MCR Project": str(_m.get("mapped_mcr") or ""),
+                            "Task": str(_m.get("mapped_task_name") or ""),
+                            "Initial risk amount": None,
+                            "EAC-reducing mitigation": _mit_amount if _is_eac_reducing else 0.0,
+                            "Identified mitigation only": 0.0 if _is_eac_reducing else _mit_amount,
+                            "Remaining amount": None,
+                            "Risk status": "",
+                            "Mitigation status": _fr_mitigation_status_labels.get(_mit_status, _mit_status),
+                            "Effective month": _fr_fmt_ym(_m.get("effective_month_ym") or ""),
+                            "Notes": str(_m.get("notes") or ""),
+                        }
+                    )
+
+        if _mitigation_rows:
+            _mitigation_total = {
+                "Financial risk": "TOTAL",
+                "Link type": "",
+                "MCR Project": "",
+                "Task": "",
+                "Initial risk amount": _risk_initial_total,
+                "EAC-reducing mitigation": _risk_covered_total,
+                "Identified mitigation only": _risk_identified_total,
+                "Remaining amount": _risk_remaining_total,
+                "Risk status": "",
+                "Mitigation status": "",
+                "Effective month": "",
+                "Notes": "",
+            }
+            _mitigation_df = pd.DataFrame(_mitigation_rows + [_mitigation_total])
+            st.dataframe(
+                _mitigation_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Initial risk amount": st.column_config.NumberColumn(format="€ %,.2f"),
+                    "EAC-reducing mitigation": st.column_config.NumberColumn(format="€ %,.2f"),
+                    "Identified mitigation only": st.column_config.NumberColumn(format="€ %,.2f"),
+                    "Remaining amount": st.column_config.NumberColumn(format="€ %,.2f"),
+                },
+            )
+            _mitigation_xlsx = BytesIO()
+            with pd.ExcelWriter(_mitigation_xlsx, engine="openpyxl") as _writer:
+                _mitigation_df.to_excel(_writer, index=False, sheet_name="Risk mitigation")
+                _ws = _writer.sheets["Risk mitigation"]
+                for _col in _ws.columns:
+                    _max_len = max(len(str(_cell.value or "")) for _cell in _col)
+                    _ws.column_dimensions[_col[0].column_letter].width = min(max(_max_len + 2, 12), 45)
+            _safe_project_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(project.get("name") or "project")).strip("_") or "project"
+            st.download_button(
+                "Download as XLSX",
+                data=_mitigation_xlsx.getvalue(),
+                file_name=f"financial_risk_mitigation_{_safe_project_name}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"fr_mitigation_xlsx_{project_id}",
+            )
+
+            st.markdown("**6.3 Financial risk aggregations**")
+            st.caption(
+                "Pivot-style summary by mitigation action. Parent rows show mitigation totals; expanded child rows show each mapped financial risk."
+            )
+
+            _risk_by_id = {int(_r.get("id") or 0): _r for _r in _fr_rows_raw}
+            _mit_agg = {}
+            for _m in _fr_map_rows:
+                _rid = int(_m.get("risk_id") or 0)
+                _risk_row = _risk_by_id.get(_rid, {})
+                _mapped_mcr = str(_m.get("mapped_mcr") or "").strip()
+                _mapped_task = str(_m.get("mapped_task_name") or "").strip()
+                _mit_type_key = _fr_norm_link_type(_m.get("mitigation_type") or "existing_task")
+                _mit_type_label = _fr_mitigation_type_labels.get(_mit_type_key, _mit_type_key)
+                _covered_amount = float(_m.get("covered_amount") or 0.0)
+                _risk_name = str(_risk_row.get("risk_name") or "").strip() or f"Risk #{_rid}"
+                _risk_initial_amount = float(_risk_row.get("total_initial_amount") or 0.0)
+                _origin_risk_mcr = str(_risk_row.get("linked_mcr") or "").strip()
+                _origin_risk_task = str(_risk_row.get("linked_task_name") or "").strip()
+                _mit_name = _mapped_task or "(Standalone mitigation line)"
+
+                _key = (_mit_name, _mapped_mcr, _mapped_task, _mit_type_label)
+                _mit_agg.setdefault(
+                    _key,
+                    {
+                        "risk_ids": set(),
+                        "risk_names": set(),
+                        "origin_mcrs": set(),
+                        "origin_tasks": set(),
+                        "risk_initial_total": 0.0,
+                        "covered_total": 0.0,
+                        "children": [],
+                    },
+                )
+                _mit_agg[_key]["covered_total"] += _covered_amount
+                _mit_agg[_key]["risk_names"].add(_risk_name)
+                if _origin_risk_mcr:
+                    _mit_agg[_key]["origin_mcrs"].add(_origin_risk_mcr)
+                if _origin_risk_task:
+                    _mit_agg[_key]["origin_tasks"].add(_origin_risk_task)
+                _mit_agg[_key]["children"].append(
+                    {
+                        "risk_name": _risk_name,
+                        "covered_amount": _covered_amount,
+                        "risk_initial_amount": _risk_initial_amount,
+                        "origin_risk_mcr": _origin_risk_mcr,
+                        "origin_risk_task": _origin_risk_task,
+                        "risk_type": _mit_type_label,
+                    }
+                )
+                if _rid > 0 and _rid not in _mit_agg[_key]["risk_ids"]:
+                    _mit_agg[_key]["risk_ids"].add(_rid)
+                    _mit_agg[_key]["risk_initial_total"] += _risk_initial_amount
+
+            _agg_expand_key = f"fr_agg_expanded_{project_id}"
+            if _agg_expand_key not in st.session_state:
+                st.session_state[_agg_expand_key] = {}
+
+            _agg_keys = sorted(_mit_agg.keys(), key=lambda _k: (_k[0].lower(), _k[1].lower(), _k[2].lower(), _k[3].lower()))
+            if _agg_keys:
+                _ae1, _ae2, _ae3, _ae4 = st.columns([3, 1, 1, 1])
+                _agg_toggle_options = {
+                    f"{_k[0]} | {_k[1] or '(blank MCR)'} | {_k[2] or '(blank task)'}": str(_k)
+                    for _k in _agg_keys
+                }
+                _agg_pick = _ae1.selectbox(
+                    "Mitigation action drill-down",
+                    list(_agg_toggle_options.keys()),
+                    key=f"{_agg_expand_key}__pick",
+                )
+                if _ae2.button("Toggle", key=f"{_agg_expand_key}__toggle"):
+                    _k = _agg_toggle_options[_agg_pick]
+                    _expanded = dict(st.session_state[_agg_expand_key])
+                    _expanded[_k] = not bool(_expanded.get(_k, False))
+                    st.session_state[_agg_expand_key] = _expanded
+                    st.rerun()
+                if _ae3.button("Expand All", key=f"{_agg_expand_key}__expand_all"):
+                    st.session_state[_agg_expand_key] = {str(_k): True for _k in _agg_keys}
+                    st.rerun()
+                if _ae4.button("Collapse All", key=f"{_agg_expand_key}__collapse_all"):
+                    st.session_state[_agg_expand_key] = {}
+                    st.rerun()
+
+            _agg_rows = []
+            _agg_mitigation_total = 0.0
+            _agg_underlying_total = 0.0
+            _dedup_risk_ids = {
+                int(_m.get("risk_id") or 0)
+                for _m in _fr_map_rows
+                if int(_m.get("risk_id") or 0) > 0
+            }
+            _agg_underlying_total_dedup = sum(
+                float((_risk_by_id.get(_rid) or {}).get("total_initial_amount") or 0.0)
+                for _rid in _dedup_risk_ids
+            )
+            for _k in _agg_keys:
+                _mit_name, _mapped_mcr, _mapped_task, _mit_type_label = _k
+                _bucket = _mit_agg[_k]
+                _expanded = bool(st.session_state[_agg_expand_key].get(str(_k), False))
+                _prefix = "▼" if _expanded and _bucket.get("children") else ("▶" if _bucket.get("children") else "")
+                _display_name = f"{_prefix} {_mit_name}".strip()
+                _risk_name_list = sorted(_bucket.get("risk_names", set()))
+                _origin_mcr_list = sorted(_bucket.get("origin_mcrs", set()))
+                _origin_task_list = sorted(_bucket.get("origin_tasks", set()))
+
+                _covered_total = float(_bucket.get("covered_total", 0.0) or 0.0)
+                _risk_initial_total = float(_bucket.get("risk_initial_total", 0.0) or 0.0)
+                _agg_mitigation_total += _covered_total
+                _agg_underlying_total += _risk_initial_total
+
+                _agg_rows.append(
+                    {
+                        "Risk mitigation Name": _display_name,
+                        "Risk mitigation amount (€)": _covered_total,
+                        "MCR Project #": _mapped_mcr,
+                        "MCR Project Task name": _mapped_task,
+                        "Origin risk MCR Project #": ", ".join(_origin_mcr_list),
+                        "Origin risk Task name": ", ".join(_origin_task_list),
+                        "Mapping to financial risk": ", ".join(_risk_name_list),
+                        "Financial risk type": _mit_type_label,
+                        "Mitigated amount for underlying financial risk (€)": _risk_initial_total,
+                    }
+                )
+
+                if _expanded:
+                    for _child in _bucket.get("children", []):
+                        _agg_rows.append(
+                            {
+                                "Risk mitigation Name": "    ↳ risk mapping",
+                                "Risk mitigation amount (€)": float(_child.get("covered_amount") or 0.0),
+                                "MCR Project #": _mapped_mcr,
+                                "MCR Project Task name": _mapped_task,
+                                "Origin risk MCR Project #": str(_child.get("origin_risk_mcr") or ""),
+                                "Origin risk Task name": str(_child.get("origin_risk_task") or ""),
+                                "Mapping to financial risk": str(_child.get("risk_name") or ""),
+                                "Financial risk type": str(_child.get("risk_type") or ""),
+                                "Mitigated amount for underlying financial risk (€)": float(_child.get("risk_initial_amount") or 0.0),
+                            }
+                        )
+
+            if _agg_rows:
+                _agg_k1, _agg_k2, _agg_k3 = st.columns(3)
+                _agg_k1.metric("Total risk mitigation amount", f"€ {_agg_mitigation_total:,.2f}")
+                _agg_k2.metric("Underlying risk total (mapping-centric)", f"€ {_agg_underlying_total:,.2f}")
+                _agg_k3.metric("Underlying risk total (deduplicated)", f"€ {_agg_underlying_total_dedup:,.2f}")
+                st.caption(
+                    "Deduplicated underlying risk total counts each linked financial risk once, even if mapped by multiple mitigation actions."
+                )
+
+                _agg_total_row = {
+                    "Risk mitigation Name": "TOTAL",
+                    "Risk mitigation amount (€)": _agg_mitigation_total,
+                    "MCR Project #": "",
+                    "MCR Project Task name": "",
+                    "Origin risk MCR Project #": "",
+                    "Origin risk Task name": "",
+                    "Mapping to financial risk": "",
+                    "Financial risk type": "",
+                    "Mitigated amount for underlying financial risk (€)": _agg_underlying_total,
+                }
+                _agg_df = pd.DataFrame(_agg_rows + [_agg_total_row])
                 st.dataframe(
-                    _mitigation_df,
+                    _agg_df,
                     hide_index=True,
                     use_container_width=True,
                     column_config={
-                        "Initial risk amount": st.column_config.NumberColumn(format="€ %,.2f"),
-                        "EAC-reducing mitigation": st.column_config.NumberColumn(format="€ %,.2f"),
-                        "Identified mitigation only": st.column_config.NumberColumn(format="€ %,.2f"),
-                        "Remaining amount": st.column_config.NumberColumn(format="€ %,.2f"),
+                        "Risk mitigation amount (€)": st.column_config.NumberColumn(format="€ %,.2f"),
+                        "Mitigated amount for underlying financial risk (€)": st.column_config.NumberColumn(format="€ %,.2f"),
                     },
                 )
-                _mitigation_xlsx = BytesIO()
-                with pd.ExcelWriter(_mitigation_xlsx, engine="openpyxl") as _writer:
-                    _mitigation_df.to_excel(_writer, index=False, sheet_name="Risk mitigation")
-                    _ws = _writer.sheets["Risk mitigation"]
-                    _apply_excel_currency_format(_ws, _mitigation_df)
-                    for _col in _ws.columns:
-                        _max_len = max(len(str(_cell.value or "")) for _cell in _col)
-                        _ws.column_dimensions[_col[0].column_letter].width = min(max(_max_len + 2, 12), 45)
-                _safe_project_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(project.get("name") or "project")).strip("_") or "project"
-                st.download_button(
-                    "Download as XLSX",
-                    data=_mitigation_xlsx.getvalue(),
-                    file_name=f"financial_risk_mitigation_{_safe_project_name}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"fr_mitigation_xlsx_{project_id}",
-                )
-    
-            with st.expander("📊 6.3 Financial risk aggregations", expanded=False):
-                st.caption(
-                    "Pivot-style summary by mitigation action. Parent rows show mitigation totals; expanded child rows show each mapped financial risk."
-                )
-    
-                _risk_by_id = {int(_r.get("id") or 0): _r for _r in _fr_rows_raw}
-                _mit_agg = {}
-                for _m in _fr_map_rows:
-                    _rid = int(_m.get("risk_id") or 0)
-                    _risk_row = _risk_by_id.get(_rid, {})
-                    _mapped_mcr = str(_m.get("mapped_mcr") or "").strip()
-                    _mapped_task = str(_m.get("mapped_task_name") or "").strip()
-                    _mit_type_key = _fr_norm_link_type(_m.get("mitigation_type") or "existing_task")
-                    _mit_type_label = _fr_mitigation_type_labels.get(_mit_type_key, _mit_type_key)
-                    _covered_amount = float(_m.get("covered_amount") or 0.0)
-                    _risk_name = str(_risk_row.get("risk_name") or "").strip() or f"Risk #{_rid}"
-                    _risk_initial_amount = float(_risk_row.get("total_initial_amount") or 0.0)
-                    _origin_risk_mcr = str(_risk_row.get("linked_mcr") or "").strip()
-                    _origin_risk_task = str(_risk_row.get("linked_task_name") or "").strip()
-                    _mit_name = _mapped_task or "(Standalone mitigation line)"
-    
-                    _key = (_mit_name, _mapped_mcr, _mapped_task, _mit_type_label)
-                    _mit_agg.setdefault(
-                        _key,
-                        {
-                            "risk_ids": set(),
-                            "risk_names": set(),
-                            "origin_mcrs": set(),
-                            "origin_tasks": set(),
-                            "risk_initial_total": 0.0,
-                            "covered_total": 0.0,
-                            "children": [],
-                        },
-                    )
-                    _mit_agg[_key]["covered_total"] += _covered_amount
-                    _mit_agg[_key]["risk_names"].add(_risk_name)
-                    if _origin_risk_mcr:
-                        _mit_agg[_key]["origin_mcrs"].add(_origin_risk_mcr)
-                    if _origin_risk_task:
-                        _mit_agg[_key]["origin_tasks"].add(_origin_risk_task)
-                    _mit_agg[_key]["children"].append(
-                        {
-                            "risk_name": _risk_name,
-                            "covered_amount": _covered_amount,
-                            "risk_initial_amount": _risk_initial_amount,
-                            "origin_risk_mcr": _origin_risk_mcr,
-                            "origin_risk_task": _origin_risk_task,
-                            "risk_type": _mit_type_label,
-                        }
-                    )
-                    if _rid > 0 and _rid not in _mit_agg[_key]["risk_ids"]:
-                        _mit_agg[_key]["risk_ids"].add(_rid)
-                        _mit_agg[_key]["risk_initial_total"] += _risk_initial_amount
-    
-                _agg_expand_key = f"fr_agg_expanded_{project_id}"
-                if _agg_expand_key not in st.session_state:
-                    st.session_state[_agg_expand_key] = {}
-    
-                _agg_keys = sorted(_mit_agg.keys(), key=lambda _k: (_k[0].lower(), _k[1].lower(), _k[2].lower(), _k[3].lower()))
-                if _agg_keys:
-                    _ae1, _ae2, _ae3, _ae4 = st.columns([3, 1, 1, 1])
-                    _agg_toggle_options = {
-                        f"{_k[0]} | {_k[1] or '(blank MCR)'} | {_k[2] or '(blank task)'}": str(_k)
-                        for _k in _agg_keys
-                    }
-                    _agg_pick = _ae1.selectbox(
-                        "Mitigation action drill-down",
-                        list(_agg_toggle_options.keys()),
-                        key=f"{_agg_expand_key}__pick",
-                    )
-                    if _ae2.button("Toggle", key=f"{_agg_expand_key}__toggle"):
-                        _k = _agg_toggle_options[_agg_pick]
-                        _expanded = dict(st.session_state[_agg_expand_key])
-                        _expanded[_k] = not bool(_expanded.get(_k, False))
-                        st.session_state[_agg_expand_key] = _expanded
-                        st.rerun()
-                    if _ae3.button("Expand All", key=f"{_agg_expand_key}__expand_all"):
-                        st.session_state[_agg_expand_key] = {str(_k): True for _k in _agg_keys}
-                        st.rerun()
-                    if _ae4.button("Collapse All", key=f"{_agg_expand_key}__collapse_all"):
-                        st.session_state[_agg_expand_key] = {}
-                        st.rerun()
-    
-                _agg_rows = []
-                _agg_mitigation_total = 0.0
-                _agg_underlying_total = 0.0
-                _dedup_risk_ids = {
-                    int(_m.get("risk_id") or 0)
-                    for _m in _fr_map_rows
-                    if int(_m.get("risk_id") or 0) > 0
+        else:
+            st.info("No financial risks yet.")
+
+        st.markdown("**6.4 Entity relationship summary (entered data)**")
+        st.caption(
+            "Cross-entity overview of Original MCR tasks, Financial risks, and Mitigation mappings using the data currently entered in the app."
+        )
+
+        _rel_plan_tasks = db.get_plan_tasks(project_id)
+        _rel_plan_cols = db.get_plan_columns(project_id)
+        _rel_text_values_map = db.get_plan_text_values_for_project(project_id)
+        _rel_value_map = db.get_plan_values_for_project(project_id)
+        _rel_mcr_col = _select_best_project_mcr_col(_rel_plan_cols, _rel_plan_tasks, _rel_text_values_map, _rel_value_map)
+        _rel_total_col = next((c for c in _rel_plan_cols if str(c.get("col_type") or "") == "total"), None)
+
+        _rel_origin_risk_links = {}
+        _rel_risk_ids_by_task = {}
+        for _r in _fr_rows_raw:
+            _rid = int(_r.get("id") or 0)
+            _link_type = _fr_norm_link_type(_r.get("link_type"))
+            if _link_type != "existing_task":
+                continue
+            _omcr = str(_r.get("linked_mcr") or "").strip()
+            _otask = str(_r.get("linked_task_name") or "").strip()
+            if not _omcr and not _otask:
+                continue
+            _key = (_omcr.lower(), _otask.lower())
+            _rel_origin_risk_links.setdefault(_key, []).append(_r)
+            _rel_risk_ids_by_task.setdefault(_key, set()).add(_rid)
+
+        _rel_mapped_links = {}
+        _rel_approved_mitigation_by_task = {}
+        for _m in _fr_map_rows:
+            _mmcr = str(_m.get("mapped_mcr") or "").strip()
+            _mtask = str(_m.get("mapped_task_name") or "").strip()
+            if not _mmcr and not _mtask:
+                continue
+            _mkey = (_mmcr.lower(), _mtask.lower())
+            _rel_mapped_links.setdefault(_mkey, []).append(_m)
+            if _fr_norm_mitigation_status(_m.get("mitigation_status")) in _fr_eac_reducing_statuses:
+                _rel_approved_mitigation_by_task[_mkey] = _rel_approved_mitigation_by_task.get(_mkey, 0.0) + float(_m.get("covered_amount") or 0.0)
+
+        _task_summary_rows = []
+        for _t in _rel_plan_tasks:
+            _tid = int(_t.get("id") or 0)
+            _task_name = str(_t.get("task_name") or "").strip()
+            _mcr_val = ""
+            if _rel_mcr_col:
+                _mcr_raw = _rel_text_values_map.get((_tid, _rel_mcr_col), "")
+                if not str(_mcr_raw or "").strip():
+                    _mcr_raw = _rel_value_map.get((_tid, _rel_mcr_col), "")
+                _mcr_val = _canonical_project_mcr(_mcr_raw)
+            _task_key = (str(_mcr_val or "").lower(), _task_name.lower())
+
+            _origin_risks = _rel_origin_risk_links.get(_task_key, [])
+            _mapped_rows = _rel_mapped_links.get(_task_key, [])
+            _approved_mitigation = float(_rel_approved_mitigation_by_task.get(_task_key, 0.0) or 0.0)
+
+            _plan_total = 0.0
+            if _rel_total_col:
+                _plan_total = float(_rel_value_map.get((_tid, _rel_total_col.get("col_key")), 0.0) or 0.0)
+
+            _task_summary_rows.append(
+                {
+                    "Task id": _tid,
+                    "Original MCR Project #": _mcr_val,
+                    "Original MCR Task name": _task_name,
+                    "Plan total (€)": _plan_total,
+                    "Origin-linked financial risks (#)": len(_origin_risks),
+                    "Origin-linked financial risk amount (€)": sum(float(_r.get("total_initial_amount") or 0.0) for _r in _origin_risks),
+                    "Mapped mitigation rows (#)": len(_mapped_rows),
+                    "Mapped mitigation covered amount (€)": sum(float(_m.get("covered_amount") or 0.0) for _m in _mapped_rows),
+                    "Approved mitigation amount (€)": _approved_mitigation,
                 }
-                _agg_underlying_total_dedup = sum(
-                    float((_risk_by_id.get(_rid) or {}).get("total_initial_amount") or 0.0)
-                    for _rid in _dedup_risk_ids
-                )
-                for _k in _agg_keys:
-                    _mit_name, _mapped_mcr, _mapped_task, _mit_type_label = _k
-                    _bucket = _mit_agg[_k]
-                    _expanded = bool(st.session_state[_agg_expand_key].get(str(_k), False))
-                    _prefix = "▼" if _expanded and _bucket.get("children") else ("▶" if _bucket.get("children") else "")
-                    _display_name = f"{_prefix} {_mit_name}".strip()
-                    _risk_name_list = sorted(_bucket.get("risk_names", set()))
-                    _origin_mcr_list = sorted(_bucket.get("origin_mcrs", set()))
-                    _origin_task_list = sorted(_bucket.get("origin_tasks", set()))
-    
-                    _covered_total = float(_bucket.get("covered_total", 0.0) or 0.0)
-                    _risk_initial_total = float(_bucket.get("risk_initial_total", 0.0) or 0.0)
-                    _agg_mitigation_total += _covered_total
-                    _agg_underlying_total += _risk_initial_total
-    
-                    _agg_rows.append(
-                        {
-                            "Risk mitigation Name": _display_name,
-                            "Risk mitigation amount (€)": _covered_total,
-                            "MCR Project #": _mapped_mcr,
-                            "MCR Project Task name": _mapped_task,
-                            "Origin risk MCR Project #": ", ".join(_origin_mcr_list),
-                            "Origin risk Task name": ", ".join(_origin_task_list),
-                            "Mapping to financial risk": ", ".join(_risk_name_list),
-                            "Financial risk type": _mit_type_label,
-                            "Mitigated amount for underlying financial risk (€)": _risk_initial_total,
-                        }
-                    )
-    
-                    if _expanded:
-                        for _child in _bucket.get("children", []):
-                            _agg_rows.append(
-                                {
-                                    "Risk mitigation Name": "    ↳ risk mapping",
-                                    "Risk mitigation amount (€)": float(_child.get("covered_amount") or 0.0),
-                                    "MCR Project #": _mapped_mcr,
-                                    "MCR Project Task name": _mapped_task,
-                                    "Origin risk MCR Project #": str(_child.get("origin_risk_mcr") or ""),
-                                    "Origin risk Task name": str(_child.get("origin_risk_task") or ""),
-                                    "Mapping to financial risk": str(_child.get("risk_name") or ""),
-                                    "Financial risk type": str(_child.get("risk_type") or ""),
-                                    "Mitigated amount for underlying financial risk (€)": float(_child.get("risk_initial_amount") or 0.0),
-                                }
-                            )
-    
-                if _agg_rows:
-                    _agg_k1, _agg_k2, _agg_k3 = st.columns(3)
-                    _agg_k1.metric("Total risk mitigation amount", f"€ {_agg_mitigation_total:,.2f}")
-                    _agg_k2.metric("Underlying risk total (mapping-centric)", f"€ {_agg_underlying_total:,.2f}")
-                    _agg_k3.metric("Underlying risk total (deduplicated)", f"€ {_agg_underlying_total_dedup:,.2f}")
-                    st.caption(
-                        "Deduplicated underlying risk total counts each linked financial risk once, even if mapped by multiple mitigation actions."
-                    )
-    
-                    _agg_total_row = {
-                        "Risk mitigation Name": "TOTAL",
-                        "Risk mitigation amount (€)": _agg_mitigation_total,
-                        "MCR Project #": "",
-                        "MCR Project Task name": "",
-                        "Origin risk MCR Project #": "",
-                        "Origin risk Task name": "",
-                        "Mapping to financial risk": "",
-                        "Financial risk type": "",
-                        "Mitigated amount for underlying financial risk (€)": _agg_underlying_total,
-                    }
-                    _agg_df = pd.DataFrame(_agg_rows + [_agg_total_row])
-                    st.dataframe(
-                        _agg_df,
-                        hide_index=True,
-                        use_container_width=True,
-                        column_config={
-                            "Risk mitigation amount (€)": st.column_config.NumberColumn(format="€ %,.2f"),
-                            "Mitigated amount for underlying financial risk (€)": st.column_config.NumberColumn(format="€ %,.2f"),
-                        },
-                    )
+            )
+
+        _standalone_risks = [
+            _r for _r in _fr_rows_raw
+            if _fr_norm_link_type(_r.get("link_type")) == "standalone"
+        ]
+
+        _relationship_rows = []
+        _fr_name_by_id_rel = {int(_r.get("id") or 0): str(_r.get("risk_name") or "") for _r in _fr_rows_raw}
+        for _m in _fr_map_rows:
+            _rid = int(_m.get("risk_id") or 0)
+            _risk_row = next((_r for _r in _fr_rows_raw if int(_r.get("id") or 0) == _rid), None)
+            _relationship_rows.append(
+                {
+                    "Risk id": _rid,
+                    "Financial risk": _fr_name_by_id_rel.get(_rid, ""),
+                    "Initial risk amount (€)": float((_risk_row or {}).get("total_initial_amount") or 0.0),
+                    "Risk link_type": _fr_norm_link_type((_risk_row or {}).get("link_type")),
+                    "Origin MCR Project #": str((_risk_row or {}).get("linked_mcr") or ""),
+                    "Origin MCR Task name": str((_risk_row or {}).get("linked_task_name") or ""),
+                    "Mitigation mapping id": int(_m.get("id") or 0),
+                    "Mitigation type": _fr_norm_link_type(_m.get("mitigation_type")),
+                    "Mapped MCR Project #": str(_m.get("mapped_mcr") or ""),
+                    "Mapped MCR Task name": str(_m.get("mapped_task_name") or ""),
+                    "Covered amount (€)": float(_m.get("covered_amount") or 0.0),
+                    "Mitigation status": _fr_norm_mitigation_status(_m.get("mitigation_status")),
+                    "Affects EAC": "Yes" if _fr_norm_mitigation_status(_m.get("mitigation_status")) in _fr_eac_reducing_statuses else "No",
+                }
+            )
+
+        _r64_k1, _r64_k2, _r64_k3, _r64_k4 = st.columns(4)
+        _r64_k1.metric("Original MCR tasks", f"{len(_rel_plan_tasks):,}")
+        _r64_k2.metric("Financial risks", f"{len(_fr_rows_raw):,}")
+        _r64_k3.metric("Standalone risks", f"{len(_standalone_risks):,}")
+        _r64_k4.metric("Mitigation mappings", f"{len(_fr_map_rows):,}")
+
+        st.caption("Task-level relationship summary (Original task -> Risks/Mitigations)")
+        if _task_summary_rows:
+            _task_rel_df = pd.DataFrame(_task_summary_rows)
+            _task_rel_total = {
+                "Task id": "",
+                "Original MCR Project #": "",
+                "Original MCR Task name": "TOTAL",
+                "Plan total (€)": float(_task_rel_df["Plan total (€)"].sum() if "Plan total (€)" in _task_rel_df.columns else 0.0),
+                "Origin-linked financial risks (#)": int(_task_rel_df["Origin-linked financial risks (#)"].sum() if "Origin-linked financial risks (#)" in _task_rel_df.columns else 0),
+                "Origin-linked financial risk amount (€)": float(_task_rel_df["Origin-linked financial risk amount (€)"].sum() if "Origin-linked financial risk amount (€)" in _task_rel_df.columns else 0.0),
+                "Mapped mitigation rows (#)": int(_task_rel_df["Mapped mitigation rows (#)"].sum() if "Mapped mitigation rows (#)" in _task_rel_df.columns else 0),
+                "Mapped mitigation covered amount (€)": float(_task_rel_df["Mapped mitigation covered amount (€)"].sum() if "Mapped mitigation covered amount (€)" in _task_rel_df.columns else 0.0),
+                "Approved mitigation amount (€)": float(_task_rel_df["Approved mitigation amount (€)"].sum() if "Approved mitigation amount (€)" in _task_rel_df.columns else 0.0),
+            }
+            _task_rel_df = pd.concat([_task_rel_df, pd.DataFrame([_task_rel_total])], ignore_index=True)
+            st.dataframe(
+                _task_rel_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Plan total (€)": st.column_config.NumberColumn(format="€ %,.2f"),
+                    "Origin-linked financial risk amount (€)": st.column_config.NumberColumn(format="€ %,.2f"),
+                    "Mapped mitigation covered amount (€)": st.column_config.NumberColumn(format="€ %,.2f"),
+                    "Approved mitigation amount (€)": st.column_config.NumberColumn(format="€ %,.2f"),
+                },
+            )
+        else:
+            st.info("No original plan tasks available for relationship summary.")
+
+        st.caption("Mapping-level relationship trace (Financial risk <-> Mitigation mapping <-> MCR task)")
+        if _relationship_rows:
+            _rel_df = pd.DataFrame(_relationship_rows)
+            _rel_risk_amount_by_id = {
+                int(_r.get("id") or 0): float(_r.get("total_initial_amount") or 0.0)
+                for _r in _fr_rows_raw
+                if int(_r.get("id") or 0) > 0
+            }
+            _rel_dedup_risk_ids = {
+                int(_rid) for _rid in _rel_df.get("Risk id", pd.Series(dtype=int)).tolist()
+                if str(_rid).strip() and int(_rid or 0) > 0
+            }
+            _rel_initial_total_mapping = float(_rel_df["Initial risk amount (€)"].sum() if "Initial risk amount (€)" in _rel_df.columns else 0.0)
+            _rel_initial_total_dedup = float(sum(_rel_risk_amount_by_id.get(_rid, 0.0) for _rid in _rel_dedup_risk_ids))
+            _rel_covered_total = float(_rel_df["Covered amount (€)"].sum() if "Covered amount (€)" in _rel_df.columns else 0.0)
+
+            _r64_m1, _r64_m2, _r64_m3 = st.columns(3)
+            _r64_m1.metric("Initial risk total (mapping-centric)", f"€ {_rel_initial_total_mapping:,.2f}")
+            _r64_m2.metric("Initial risk total (deduplicated)", f"€ {_rel_initial_total_dedup:,.2f}")
+            _r64_m3.metric("Covered amount total", f"€ {_rel_covered_total:,.2f}")
+            st.caption("Deduplicated initial risk total counts each risk id once even when mapped multiple times.")
+
+            _rel_total = {
+                "Risk id": "",
+                "Financial risk": "TOTAL (mapping-centric)",
+                "Initial risk amount (€)": _rel_initial_total_mapping,
+                "Risk link_type": "",
+                "Origin MCR Project #": "",
+                "Origin MCR Task name": "",
+                "Mitigation mapping id": "",
+                "Mitigation type": "",
+                "Mapped MCR Project #": "",
+                "Mapped MCR Task name": "",
+                "Covered amount (€)": _rel_covered_total,
+                "Mitigation status": "",
+                "Affects EAC": "",
+            }
+            _rel_df = pd.concat([_rel_df, pd.DataFrame([_rel_total])], ignore_index=True)
+            st.dataframe(
+                _rel_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Initial risk amount (€)": st.column_config.NumberColumn(format="€ %,.2f"),
+                    "Covered amount (€)": st.column_config.NumberColumn(format="€ %,.2f"),
+                },
+            )
+        else:
+            st.info("No mitigation mappings available for relationship trace.")
+
+        st.markdown("**6.5 Risk mitigation control panel**")
+        st.caption("View and update the implementation status of all risk mitigation mappings. Status changes save immediately per row.")
+
+        if not _fr_map_rows:
+            st.info("No mitigation mappings available. Add mappings in section 6.2.")
+        else:
+            _ctrl_approved_total = sum(
+                float(_m.get("covered_amount") or 0.0)
+                for _m in _fr_map_rows
+                if _fr_norm_mitigation_status(_m.get("mitigation_status")) == "approved"
+            )
+            _ctrl_planned_total = sum(
+                float(_m.get("covered_amount") or 0.0)
+                for _m in _fr_map_rows
+                if _fr_norm_mitigation_status(_m.get("mitigation_status")) == "planned"
+            )
+            _ctrl_identified_total = sum(
+                float(_m.get("covered_amount") or 0.0)
+                for _m in _fr_map_rows
+                if _fr_norm_mitigation_status(_m.get("mitigation_status")) == "identified"
+            )
+            _ctrl_k1, _ctrl_k2, _ctrl_k3 = st.columns(3)
+            _ctrl_k1.metric("Approved mitigation (€)", f"€ {_ctrl_approved_total:,.0f}")
+            _ctrl_k2.metric("Planned mitigation (€)", f"€ {_ctrl_planned_total:,.0f}")
+            _ctrl_k3.metric("Identified mitigation (€)", f"€ {_ctrl_identified_total:,.0f}")
+
+            _ctrl_view = st.radio(
+                "View",
+                ["Table", "Board"],
+                horizontal=True,
+                key=f"ctrl_view_{project_id}",
+            )
+
+            _ctrl_all_mcrs = sorted({str(_m.get("mapped_mcr") or "").strip() for _m in _fr_map_rows if str(_m.get("mapped_mcr") or "").strip()})
+            _ctrl_filter_mcr = st.selectbox(
+                "Filter by MCR Project #",
+                ["(All)"] + _ctrl_all_mcrs,
+                key=f"ctrl_filter_mcr_{project_id}",
+            )
+            _ctrl_filter_status = st.multiselect(
+                "Filter by status",
+                ["Approved", "Planned", "Identified", "Cancelled"],
+                default=["Approved", "Planned", "Identified"],
+                key=f"ctrl_filter_status_{project_id}",
+            )
+            _ctrl_filter_status_norm = {_s.lower() for _s in _ctrl_filter_status}
+
+            _ctrl_visible_rows = [
+                _m for _m in _fr_map_rows
+                if (_ctrl_filter_mcr == "(All)" or str(_m.get("mapped_mcr") or "").strip() == _ctrl_filter_mcr)
+                and _fr_norm_mitigation_status(_m.get("mitigation_status")) in _ctrl_filter_status_norm
+            ]
+
+            _ctrl_status_options = ["Identified", "Planned", "Approved", "Cancelled"]
+            _ctrl_status_badge = {
+                "approved": "✅ Approved",
+                "planned": "🟡 Planned",
+                "identified": "🔵 Identified",
+                "cancelled": "❌ Cancelled",
+            }
+            _ctrl_status_color = {
+                "approved": "#c8e6c9",
+                "planned": "#fff9c4",
+                "identified": "#e3f2fd",
+                "cancelled": "#f5f5f5",
+            }
+
+            if _ctrl_view == "Table":
+                if not _ctrl_visible_rows:
+                    st.info("No mitigation rows match the current filter.")
                 else:
-                    st.info("No financial risks yet.")
-    
-            with st.expander("🔄 6.4 Entity relationship summary", expanded=False):
-                st.caption(
-                    "Cross-entity overview of Original MCR tasks, Financial risks, and Mitigation mappings using the data currently entered in the app."
-                )
-        
-                _rel_plan_tasks = db.get_plan_tasks(project_id)
-                _rel_plan_cols = db.get_plan_columns(project_id)
-                _rel_text_values_map = db.get_plan_text_values_for_project(project_id)
-                _rel_value_map = db.get_plan_values_for_project(project_id)
-                _rel_mcr_col = _select_best_project_mcr_col(_rel_plan_cols, _rel_plan_tasks, _rel_text_values_map, _rel_value_map)
-                _rel_total_col = next((c for c in _rel_plan_cols if str(c.get("col_type") or "") == "total"), None)
-        
-                _rel_origin_risk_links = {}
-                _rel_risk_ids_by_task = {}
-                for _r in _fr_rows_raw:
-                    _rid = int(_r.get("id") or 0)
-                    _link_type = _fr_norm_link_type(_r.get("link_type"))
-                    if _link_type != "existing_task":
-                        continue
-                    _omcr = str(_r.get("linked_mcr") or "").strip()
-                    _otask = str(_r.get("linked_task_name") or "").strip()
-                    if not _omcr and not _otask:
-                        continue
-                    _key = (_omcr.lower(), _otask.lower())
-                    _rel_origin_risk_links.setdefault(_key, []).append(_r)
-                    _rel_risk_ids_by_task.setdefault(_key, set()).add(_rid)
-        
-                _rel_mapped_links = {}
-                _rel_approved_mitigation_by_task = {}
-                for _m in _fr_map_rows:
-                    _mmcr = str(_m.get("mapped_mcr") or "").strip()
-                    _mtask = str(_m.get("mapped_task_name") or "").strip()
-                    if not _mmcr and not _mtask:
-                        continue
-                    _mkey = (_mmcr.lower(), _mtask.lower())
-                    _rel_mapped_links.setdefault(_mkey, []).append(_m)
-                    if _fr_norm_mitigation_status(_m.get("mitigation_status")) in _fr_eac_reducing_statuses:
-                        _rel_approved_mitigation_by_task[_mkey] = _rel_approved_mitigation_by_task.get(_mkey, 0.0) + float(_m.get("covered_amount") or 0.0)
-        
-                _task_summary_rows = []
-                for _t in _rel_plan_tasks:
-                    _tid = int(_t.get("id") or 0)
-                    _task_name = str(_t.get("task_name") or "").strip()
-                    _mcr_val = ""
-                    if _rel_mcr_col:
-                        _mcr_raw = _rel_text_values_map.get((_tid, _rel_mcr_col), "")
-                        if not str(_mcr_raw or "").strip():
-                            _mcr_raw = _rel_value_map.get((_tid, _rel_mcr_col), "")
-                        _mcr_val = _canonical_project_mcr(_mcr_raw)
-                    _task_key = (str(_mcr_val or "").lower(), _task_name.lower())
-        
-                    _origin_risks = _rel_origin_risk_links.get(_task_key, [])
-                    _mapped_rows = _rel_mapped_links.get(_task_key, [])
-                    _approved_mitigation = float(_rel_approved_mitigation_by_task.get(_task_key, 0.0) or 0.0)
-        
-                    _plan_total = 0.0
-                    if _rel_total_col:
-                        _plan_total = float(_rel_value_map.get((_tid, _rel_total_col.get("col_key")), 0.0) or 0.0)
-        
-                    _task_summary_rows.append(
-                        {
-                            "Task id": _tid,
-                            "Original MCR Project #": _mcr_val,
-                            "Original MCR Task name": _task_name,
-                            "Plan total (€)": _plan_total,
-                            "Origin-linked financial risks (#)": len(_origin_risks),
-                            "Origin-linked financial risk amount (€)": sum(float(_r.get("total_initial_amount") or 0.0) for _r in _origin_risks),
-                            "Mapped mitigation rows (#)": len(_mapped_rows),
-                            "Mapped mitigation covered amount (€)": sum(float(_m.get("covered_amount") or 0.0) for _m in _mapped_rows),
-                            "Approved mitigation amount (€)": _approved_mitigation,
-                        }
-                    )
-        
-                _standalone_risks = [
-                    _r for _r in _fr_rows_raw
-                    if _fr_norm_link_type(_r.get("link_type")) == "standalone"
-                ]
-        
-                _relationship_rows = []
-                _fr_name_by_id_rel = {int(_r.get("id") or 0): str(_r.get("risk_name") or "") for _r in _fr_rows_raw}
-                for _m in _fr_map_rows:
-                    _rid = int(_m.get("risk_id") or 0)
-                    _risk_row = next((_r for _r in _fr_rows_raw if int(_r.get("id") or 0) == _rid), None)
-                    _relationship_rows.append(
-                        {
-                            "Risk id": _rid,
-                            "Financial risk": _fr_name_by_id_rel.get(_rid, ""),
-                            "Initial risk amount (€)": float((_risk_row or {}).get("total_initial_amount") or 0.0),
-                            "Risk link_type": _fr_norm_link_type((_risk_row or {}).get("link_type")),
-                            "Origin MCR Project #": str((_risk_row or {}).get("linked_mcr") or ""),
-                            "Origin MCR Task name": str((_risk_row or {}).get("linked_task_name") or ""),
-                            "Mitigation mapping id": int(_m.get("id") or 0),
-                            "Mitigation type": _fr_norm_link_type(_m.get("mitigation_type")),
-                            "Mapped MCR Project #": str(_m.get("mapped_mcr") or ""),
-                            "Mapped MCR Task name": str(_m.get("mapped_task_name") or ""),
-                            "Covered amount (€)": float(_m.get("covered_amount") or 0.0),
-                            "Mitigation status": _fr_norm_mitigation_status(_m.get("mitigation_status")),
-                            "Affects EAC": "Yes" if _fr_norm_mitigation_status(_m.get("mitigation_status")) in _fr_eac_reducing_statuses else "No",
-                        }
-                    )
-        
-                _r64_k1, _r64_k2, _r64_k3, _r64_k4 = st.columns(4)
-                _r64_k1.metric("Original MCR tasks", f"{len(_rel_plan_tasks):,}")
-                _r64_k2.metric("Financial risks", f"{len(_fr_rows_raw):,}")
-                _r64_k3.metric("Standalone risks", f"{len(_standalone_risks):,}")
-                _r64_k4.metric("Mitigation mappings", f"{len(_fr_map_rows):,}")
-        
-                st.caption("Task-level relationship summary (Original task -> Risks/Mitigations)")
-                if _task_summary_rows:
-                    _task_rel_df = pd.DataFrame(_task_summary_rows)
-                    _task_rel_total = {
-                        "Task id": "",
-                        "Original MCR Project #": "",
-                        "Original MCR Task name": "TOTAL",
-                        "Plan total (€)": float(_task_rel_df["Plan total (€)"].sum() if "Plan total (€)" in _task_rel_df.columns else 0.0),
-                        "Origin-linked financial risks (#)": int(_task_rel_df["Origin-linked financial risks (#)"].sum() if "Origin-linked financial risks (#)" in _task_rel_df.columns else 0),
-                        "Origin-linked financial risk amount (€)": float(_task_rel_df["Origin-linked financial risk amount (€)"].sum() if "Origin-linked financial risk amount (€)" in _task_rel_df.columns else 0.0),
-                        "Mapped mitigation rows (#)": int(_task_rel_df["Mapped mitigation rows (#)"].sum() if "Mapped mitigation rows (#)" in _task_rel_df.columns else 0),
-                        "Mapped mitigation covered amount (€)": float(_task_rel_df["Mapped mitigation covered amount (€)"].sum() if "Mapped mitigation covered amount (€)" in _task_rel_df.columns else 0.0),
-                        "Approved mitigation amount (€)": float(_task_rel_df["Approved mitigation amount (€)"].sum() if "Approved mitigation amount (€)" in _task_rel_df.columns else 0.0),
-                    }
-                    _task_rel_df = pd.concat([_task_rel_df, pd.DataFrame([_task_rel_total])], ignore_index=True)
-                    st.dataframe(
-                        _task_rel_df,
-                        hide_index=True,
-                        use_container_width=True,
-                        column_config={
-                            "Plan total (€)": st.column_config.NumberColumn(format="€ %,.2f"),
-                            "Origin-linked financial risk amount (€)": st.column_config.NumberColumn(format="€ %,.2f"),
-                            "Mapped mitigation covered amount (€)": st.column_config.NumberColumn(format="€ %,.2f"),
-                            "Approved mitigation amount (€)": st.column_config.NumberColumn(format="€ %,.2f"),
-                        },
-                    )
-                else:
-                    st.info("No original plan tasks available for relationship summary.")
-        
-                st.caption("Mapping-level relationship trace (Financial risk <-> Mitigation mapping <-> MCR task)")
-                if _relationship_rows:
-                    _rel_df = pd.DataFrame(_relationship_rows)
-                    _rel_risk_amount_by_id = {
-                        int(_r.get("id") or 0): float(_r.get("total_initial_amount") or 0.0)
-                        for _r in _fr_rows_raw
-                        if int(_r.get("id") or 0) > 0
-                    }
-                    _rel_dedup_risk_ids = {
-                        int(_rid) for _rid in _rel_df.get("Risk id", pd.Series(dtype=int)).tolist()
-                        if str(_rid).strip() and int(_rid or 0) > 0
-                    }
-                    _rel_initial_total_mapping = float(_rel_df["Initial risk amount (€)"].sum() if "Initial risk amount (€)" in _rel_df.columns else 0.0)
-                    _rel_initial_total_dedup = float(sum(_rel_risk_amount_by_id.get(_rid, 0.0) for _rid in _rel_dedup_risk_ids))
-                    _rel_covered_total = float(_rel_df["Covered amount (€)"].sum() if "Covered amount (€)" in _rel_df.columns else 0.0)
-        
-                    _r64_m1, _r64_m2, _r64_m3 = st.columns(3)
-                    _r64_m1.metric("Initial risk total (mapping-centric)", f"€ {_rel_initial_total_mapping:,.2f}")
-                    _r64_m2.metric("Initial risk total (deduplicated)", f"€ {_rel_initial_total_dedup:,.2f}")
-                    _r64_m3.metric("Covered amount total", f"€ {_rel_covered_total:,.2f}")
-                    st.caption("Deduplicated initial risk total counts each risk id once even when mapped multiple times.")
-        
-                    _rel_total = {
-                        "Risk id": "",
-                        "Financial risk": "TOTAL (mapping-centric)",
-                        "Initial risk amount (€)": _rel_initial_total_mapping,
-                        "Risk link_type": "",
-                        "Origin MCR Project #": "",
-                        "Origin MCR Task name": "",
-                        "Mitigation mapping id": "",
-                        "Mitigation type": "",
-                        "Mapped MCR Project #": "",
-                        "Mapped MCR Task name": "",
-                        "Covered amount (€)": _rel_covered_total,
-                        "Mitigation status": "",
-                        "Affects EAC": "",
-                    }
-                    _rel_df = pd.concat([_rel_df, pd.DataFrame([_rel_total])], ignore_index=True)
-                    st.dataframe(
-                        _rel_df,
-                        hide_index=True,
-                        use_container_width=True,
-                        column_config={
-                            "Initial risk amount (€)": st.column_config.NumberColumn(format="€ %,.2f"),
-                            "Covered amount (€)": st.column_config.NumberColumn(format="€ %,.2f"),
-                        },
-                    )
-                else:
-                    st.info("No mitigation mappings available for relationship trace.")
-        
-            with st.expander("🎛️ 6.5 Risk mitigation control panel", expanded=False):
-                st.caption("View and update the implementation status of all risk mitigation mappings. Status changes save immediately per row.")
-        
-                if not _fr_map_rows:
-                    st.info("No mitigation mappings available. Add mappings in section 6.2.")
-                else:
-                    _ctrl_approved_total = sum(
-                        float(_m.get("covered_amount") or 0.0)
-                        for _m in _fr_map_rows
-                        if _fr_norm_mitigation_status(_m.get("mitigation_status")) == "approved"
-                    )
-                    _ctrl_planned_total = sum(
-                        float(_m.get("covered_amount") or 0.0)
-                        for _m in _fr_map_rows
-                        if _fr_norm_mitigation_status(_m.get("mitigation_status")) == "planned"
-                    )
-                    _ctrl_identified_total = sum(
-                        float(_m.get("covered_amount") or 0.0)
-                        for _m in _fr_map_rows
-                        if _fr_norm_mitigation_status(_m.get("mitigation_status")) == "identified"
-                    )
-                    _ctrl_k1, _ctrl_k2, _ctrl_k3 = st.columns(3)
-                    _ctrl_k1.metric("Approved mitigation (€)", f"€ {_ctrl_approved_total:,.0f}")
-                    _ctrl_k2.metric("Planned mitigation (€)", f"€ {_ctrl_planned_total:,.0f}")
-                    _ctrl_k3.metric("Identified mitigation (€)", f"€ {_ctrl_identified_total:,.0f}")
-        
-                    _ctrl_view = st.radio(
-                        "View",
-                        ["Table", "Board"],
-                        horizontal=True,
-                        key=f"ctrl_view_{project_id}",
-                    )
-        
-                    _ctrl_all_mcrs = sorted({str(_m.get("mapped_mcr") or "").strip() for _m in _fr_map_rows if str(_m.get("mapped_mcr") or "").strip()})
-                    _ctrl_filter_mcr = st.selectbox(
-                        "Filter by MCR Project #",
-                        ["(All)"] + _ctrl_all_mcrs,
-                        key=f"ctrl_filter_mcr_{project_id}",
-                    )
-                    _ctrl_filter_status = st.multiselect(
-                        "Filter by status",
-                        ["Approved", "Planned", "Identified", "Cancelled"],
-                        default=["Approved", "Planned", "Identified"],
-                        key=f"ctrl_filter_status_{project_id}",
-                    )
-                    _ctrl_filter_status_norm = {_s.lower() for _s in _ctrl_filter_status}
-        
-                    _ctrl_visible_rows = [
-                        _m for _m in _fr_map_rows
-                        if (_ctrl_filter_mcr == "(All)" or str(_m.get("mapped_mcr") or "").strip() == _ctrl_filter_mcr)
-                        and _fr_norm_mitigation_status(_m.get("mitigation_status")) in _ctrl_filter_status_norm
-                    ]
-        
-                    _ctrl_status_options = ["Identified", "Planned", "Approved", "Cancelled"]
-                    _ctrl_status_badge = {
-                        "approved": "✅ Approved",
-                        "planned": "🟡 Planned",
-                        "identified": "🔵 Identified",
-                        "cancelled": "❌ Cancelled",
-                    }
-                    _ctrl_status_color = {
-                        "approved": "#c8e6c9",
-                        "planned": "#fff9c4",
-                        "identified": "#e3f2fd",
-                        "cancelled": "#f5f5f5",
-                    }
-        
-                    if _ctrl_view == "Table":
-                        if not _ctrl_visible_rows:
-                            st.info("No mitigation rows match the current filter.")
-                        else:
-                            with st.expander(f"⚡ Bulk update ({len(_ctrl_visible_rows)} visible rows)", expanded=False):
-                                st.caption(
-                                    "Set a new status for all currently visible rows at once. "
-                                    "Filter by MCR or status above to narrow the scope before applying."
-                                )
-                                _bulk_c1, _bulk_c2, _bulk_c3 = st.columns([3, 2, 2])
-                                _bulk_new_status_label = _bulk_c1.selectbox(
-                                    "Set all visible rows to status",
-                                    _ctrl_status_options,
-                                    key=f"ctrl_bulk_status_{project_id}",
-                                )
-                                _bulk_new_status_norm = _bulk_new_status_label.lower()
-                                _bulk_affected = [
-                                    _m for _m in _ctrl_visible_rows
-                                    if _fr_norm_mitigation_status(_m.get("mitigation_status")) != _bulk_new_status_norm
-                                ]
-                                _bulk_c2.metric(
-                                    "Rows that will change",
-                                    len(_bulk_affected),
-                                    help="Rows already at the target status are skipped.",
-                                )
-                                _bulk_total_eur = sum(float(_m.get("covered_amount") or 0.0) for _m in _bulk_affected)
-                                _bulk_c3.metric(
-                                    "Affected coverage (€)",
-                                    f"€ {_bulk_total_eur:,.0f}",
-                                )
-                                if _bulk_affected:
-                                    if st.button(
-                                        f"Apply: set {len(_bulk_affected)} row(s) → {_ctrl_status_badge.get(_bulk_new_status_norm, _bulk_new_status_label)}",
-                                        key=f"ctrl_bulk_apply_{project_id}",
-                                        type="primary",
-                                    ):
-                                        _bulk_updated = 0
-                                        for _bm in _bulk_affected:
-                                            _bmid = int(_bm.get("id") or 0)
-                                            _bmrid = int(_bm.get("risk_id") or 0)
-                                            _bm_mcr = str(_bm.get("mapped_mcr") or "").strip()
-                                            _bm_task = str(_bm.get("mapped_task_name") or "").strip()
-                                            _bm_amount = float(_bm.get("covered_amount") or 0.0)
-                                            _bm_type = _fr_norm_link_type(_bm.get("mitigation_type") or "existing_task")
-                                            db.update_financial_risk_mapping(
-                                                _bmid, _bmrid, _bm_mcr, _bm_task,
-                                                _bm_amount, _bm_type, _bulk_new_status_norm,
-                                                _bm.get("effective_month_ym") or "",
-                                                _bm.get("notes") or "",
-                                            )
-                                            _bulk_updated += 1
-                                        st.success(
-                                            f"Bulk update complete: {_bulk_updated} row(s) set to '{_bulk_new_status_label}' "
-                                            f"(€ {_bulk_total_eur:,.0f} affected)."
-                                        )
-                                        st.rerun()
-                                else:
-                                    st.info("All visible rows are already at the selected target status.")
-        
-                            st.caption(f"Showing {len(_ctrl_visible_rows)} mitigation mapping(s). Use the dropdowns to change status; changes save immediately.")
-                            for _mit in _ctrl_visible_rows:
-                                _mid = int(_mit.get("id") or 0)
-                                _rid = int(_mit.get("risk_id") or 0)
-                                _risk_name = _fr_name_by_id.get(_rid, f"Risk #{_rid}")
-                                _mit_mcr = str(_mit.get("mapped_mcr") or "").strip()
-                                _mit_task = str(_mit.get("mapped_task_name") or "").strip()
-                                _mit_amount = float(_mit.get("covered_amount") or 0.0)
-                                _mit_notes = str(_mit.get("notes") or "").strip()
-                                _mit_eff = _fr_fmt_ym(_mit.get("effective_month_ym") or "")
-                                _mit_type = _fr_norm_link_type(_mit.get("mitigation_type") or "existing_task")
-                                _current_status_norm = _fr_norm_mitigation_status(_mit.get("mitigation_status"))
-                                _current_status_label = _fr_mitigation_status_labels.get(_current_status_norm, _current_status_norm)
-        
-                                _row_bg = _ctrl_status_color.get(_current_status_norm, "#ffffff")
-                                st.markdown(
-                                    f"""
-                                    <div style="background:{_row_bg};border-radius:6px;padding:8px 12px;margin-bottom:6px;border:1px solid #ddd;">
-                                    <strong>{_mit_task or '(Standalone)'}</strong> &nbsp;|&nbsp; {_mit_mcr} &nbsp;|&nbsp;
-                                    Risk: <em>{_risk_name}</em> &nbsp;|&nbsp;
-                                    €&nbsp;{_mit_amount:,.0f}
-                                    {' &nbsp;|&nbsp; Effective: ' + _mit_eff if _mit_eff else ''}
-                                    {' &nbsp;|&nbsp; 📝 ' + _mit_notes[:60] + ('…' if len(_mit_notes) > 60 else '') if _mit_notes else ''}
-                                    </div>""",
-                                    unsafe_allow_html=True,
-                                )
-        
-                                _tc1, _tc2, _tc3, _tc4, _tc5 = st.columns([3, 2, 1, 1, 1])
-                                _new_status_label = _tc1.selectbox(
-                                    "Status",
-                                    _ctrl_status_options,
-                                    index=_ctrl_status_options.index(_current_status_label.split(" ")[-1]) if _current_status_label.split(" ")[-1] in _ctrl_status_options else 1,
-                                    key=f"ctrl_status_sel_{project_id}_{_mid}",
-                                    label_visibility="collapsed",
-                                )
-                                _new_status_norm = _new_status_label.lower()
-        
-                                if _tc2.button(
-                                    f"{_ctrl_status_badge.get(_new_status_norm, _new_status_label)} Save",
-                                    key=f"ctrl_save_{project_id}_{_mid}",
-                                    disabled=(_new_status_norm == _current_status_norm),
-                                ):
-                                    db.update_financial_risk_mapping(
-                                        _mid, _rid, _mit_mcr, _mit_task,
-                                        _mit_amount, _mit_type, _new_status_norm,
-                                        _mit.get("effective_month_ym") or "",
-                                        _mit.get("notes") or "",
-                                    )
-                                    st.success(f"Status updated to '{_new_status_label}' for '{_mit_task or '(Standalone)'}' (€ {_mit_amount:,.0f}).")
-                                    st.rerun()
-        
-                                if _tc3.button("✅", key=f"ctrl_approve_{project_id}_{_mid}", help="Approve", disabled=(_current_status_norm == "approved")):
-                                    db.update_financial_risk_mapping(
-                                        _mid, _rid, _mit_mcr, _mit_task,
-                                        _mit_amount, _mit_type, "approved",
-                                        _mit.get("effective_month_ym") or "",
-                                        _mit.get("notes") or "",
-                                    )
-                                    st.success(f"'{_mit_task or '(Standalone)'}' approved.")
-                                    st.rerun()
-        
-                                if _tc4.button("🟡", key=f"ctrl_plan_{project_id}_{_mid}", help="Mark Planned", disabled=(_current_status_norm == "planned")):
-                                    db.update_financial_risk_mapping(
-                                        _mid, _rid, _mit_mcr, _mit_task,
-                                        _mit_amount, _mit_type, "planned",
-                                        _mit.get("effective_month_ym") or "",
-                                        _mit.get("notes") or "",
-                                    )
-                                    st.success(f"'{_mit_task or '(Standalone)'}' marked as planned.")
-                                    st.rerun()
-        
-                                if _tc5.button("❌", key=f"ctrl_cancel_{project_id}_{_mid}", help="Cancel mitigation", disabled=(_current_status_norm == "cancelled")):
-                                    db.update_financial_risk_mapping(
-                                        _mid, _rid, _mit_mcr, _mit_task,
-                                        _mit_amount, _mit_type, "cancelled",
-                                        _mit.get("effective_month_ym") or "",
-                                        _mit.get("notes") or "",
-                                    )
-                                    st.warning(f"'{_mit_task or '(Standalone)'}' cancelled.")
-                                    st.rerun()
-        
-                                st.divider()
-        
-                    else:  # Board view
-                        _ctrl_board_statuses = ["identified", "planned", "approved", "cancelled"]
-                        _ctrl_board_labels = {
-                            "identified": "🔵 Identified",
-                            "planned": "🟡 Planned",
-                            "approved": "✅ Approved",
-                            "cancelled": "❌ Cancelled",
-                        }
-                        _ctrl_board_cols = st.columns(4)
-                        for _bi, _bstatus in enumerate(_ctrl_board_statuses):
-                            _bcol = _ctrl_board_cols[_bi]
-                            _bcol.markdown(f"**{_ctrl_board_labels[_bstatus]}**")
-                            _board_rows = [
-                                _m for _m in _ctrl_visible_rows
-                                if _fr_norm_mitigation_status(_m.get("mitigation_status")) == _bstatus
-                            ]
-                            if not _board_rows:
-                                _bcol.caption("(none)")
-                            for _bm in _board_rows:
-                                _bmid = int(_bm.get("id") or 0)
-                                _bmrid = int(_bm.get("risk_id") or 0)
-                                _bm_risk = _fr_name_by_id.get(_bmrid, f"Risk #{_bmrid}")
-                                _bm_mcr = str(_bm.get("mapped_mcr") or "").strip()
-                                _bm_task = str(_bm.get("mapped_task_name") or "").strip()
-                                _bm_amount = float(_bm.get("covered_amount") or 0.0)
-                                _bm_type = _fr_norm_link_type(_bm.get("mitigation_type") or "existing_task")
-                                _bm_notes = str(_bm.get("notes") or "").strip()
-                                _bm_eff = _fr_fmt_ym(_bm.get("effective_month_ym") or "")
-                                _bm_bg = _ctrl_status_color.get(_bstatus, "#ffffff")
-                                _bcol.markdown(
-                                    f"""
-                                    <div style="background:{_bm_bg};border-radius:6px;padding:8px;margin-bottom:8px;border:1px solid #ccc;font-size:0.85em;">
-                                    <strong>{_bm_task or '(Standalone)'}</strong><br/>
-                                    {_bm_mcr}<br/>
-                                    <em style='color:#555'>Risk: {_bm_risk}</em><br/>
-                                    <strong>€&nbsp;{_bm_amount:,.0f}</strong>
-                                    {('<br/><span style="color:#888">Effective: ' + _bm_eff + '</span>') if _bm_eff else ''}
-                                    {('<br/><span style="color:#888" title="' + _bm_notes + '">📝 Notes</span>') if _bm_notes else ''}
-                                    </div>""",
-                                    unsafe_allow_html=True,
-                                )
-                                if _bstatus == "identified":
-                                    if _bcol.button("→ Mark Planned", key=f"ctrl_b_plan_{project_id}_{_bmid}"):
-                                        db.update_financial_risk_mapping(_bmid, _bmrid, _bm_mcr, _bm_task, _bm_amount, _bm_type, "planned", _bm.get("effective_month_ym") or "", _bm.get("notes") or "")
-                                        st.success(f"Marked as Planned.")
-                                        st.rerun()
-                                elif _bstatus == "planned":
-                                    if _bcol.button("→ Approve", key=f"ctrl_b_approve_{project_id}_{_bmid}"):
-                                        db.update_financial_risk_mapping(_bmid, _bmrid, _bm_mcr, _bm_task, _bm_amount, _bm_type, "approved", _bm.get("effective_month_ym") or "", _bm.get("notes") or "")
-                                        st.success(f"Approved.")
-                                        st.rerun()
-                                elif _bstatus == "approved":
-                                    if _bcol.button("↩ Revert to Planned", key=f"ctrl_b_revert_{project_id}_{_bmid}"):
-                                        db.update_financial_risk_mapping(_bmid, _bmrid, _bm_mcr, _bm_task, _bm_amount, _bm_type, "planned", _bm.get("effective_month_ym") or "", _bm.get("notes") or "")
-                                        st.warning(f"Reverted to Planned.")
-                                        st.rerun()
-                                elif _bstatus == "cancelled":
-                                    if _bcol.button("↩ Reactivate", key=f"ctrl_b_reactivate_{project_id}_{_bmid}"):
-                                        db.update_financial_risk_mapping(_bmid, _bmrid, _bm_mcr, _bm_task, _bm_amount, _bm_type, "identified", _bm.get("effective_month_ym") or "", _bm.get("notes") or "")
-                                        st.success(f"Reactivated as Identified.")
-                                        st.rerun()
-                                if _bstatus != "cancelled":
-                                    if _bcol.button("❌ Cancel", key=f"ctrl_b_cancel_{project_id}_{_bmid}"):
-                                        db.update_financial_risk_mapping(_bmid, _bmrid, _bm_mcr, _bm_task, _bm_amount, _bm_type, "cancelled", _bm.get("effective_month_ym") or "", _bm.get("notes") or "")
-                                        st.warning(f"Cancelled.")
-                                        st.rerun()
-        
-            with st.expander("🧪 Mitigation status diagnostics", expanded=False):
-                st.caption("Read-only check of mitigation status distribution after normalization (implemented -> approved, included_in_plan -> planned).")
-                if not _fr_map_rows:
-                    st.info("No mitigation rows available for diagnostics.")
-                else:
-                    _status_summary = {}
-                    for _m in _fr_map_rows:
-                        _status_key = _fr_norm_mitigation_status(_m.get("mitigation_status"))
-                        _status_label = _fr_mitigation_status_labels.get(_status_key, _status_key)
-                        _covered = float(_m.get("covered_amount") or 0.0)
-                        _status_summary.setdefault(_status_label, {"rows": 0, "covered": 0.0, "eac_reducing": 0.0})
-                        _status_summary[_status_label]["rows"] += 1
-                        _status_summary[_status_label]["covered"] += _covered
-                        if _status_key in _fr_eac_reducing_statuses:
-                            _status_summary[_status_label]["eac_reducing"] += _covered
-    
-                    _diag_rows = []
-                    for _label in sorted(_status_summary.keys()):
-                        _v = _status_summary[_label]
-                        _diag_rows.append(
-                            {
-                                "Mitigation status": _label,
-                                "Row count": int(_v.get("rows", 0) or 0),
-                                "Covered amount": float(_v.get("covered", 0.0) or 0.0),
-                                "EAC-reducing covered amount": float(_v.get("eac_reducing", 0.0) or 0.0),
-                            }
+                    with st.expander(f"⚡ Bulk update ({len(_ctrl_visible_rows)} visible rows)", expanded=False):
+                        st.caption(
+                            "Set a new status for all currently visible rows at once. "
+                            "Filter by MCR or status above to narrow the scope before applying."
                         )
-    
-                    _diag_df = pd.DataFrame(_diag_rows)
-                    _diag_totals = {
-                        "Mitigation status": "TOTAL",
-                        "Row count": int(_diag_df["Row count"].sum() if "Row count" in _diag_df.columns else 0),
-                        "Covered amount": float(_diag_df["Covered amount"].sum() if "Covered amount" in _diag_df.columns else 0.0),
-                        "EAC-reducing covered amount": float(_diag_df["EAC-reducing covered amount"].sum() if "EAC-reducing covered amount" in _diag_df.columns else 0.0),
-                    }
-                    _diag_df = pd.concat([_diag_df, pd.DataFrame([_diag_totals])], ignore_index=True)
-                    st.dataframe(
-                        _diag_df,
-                        hide_index=True,
-                        use_container_width=True,
-                        column_config={
-                            "Covered amount": st.column_config.NumberColumn(format="€ %,.2f"),
-                            "EAC-reducing covered amount": st.column_config.NumberColumn(format="€ %,.2f"),
-                        },
-                    )
-                    _diag_safe_project_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(project.get("name") or "project")).strip("_") or "project"
-                    st.download_button(
-                        "Download diagnostics as CSV",
-                        data=_diag_df.to_csv(index=False).encode("utf-8-sig"),
-                        file_name=f"mitigation_status_diagnostics_{_diag_safe_project_name}.csv",
-                        mime="text/csv",
-                        key=f"fr_diag_csv_{project_id}",
-                    )
-    
-            if _fr_map_rows:
-                _del_map_options = {
-                    f"[{int(m.get('id') or 0)}] {_fr_name_by_id.get(int(m.get('risk_id') or 0), '')} | {m.get('mapped_mcr') or ''} | {m.get('mapped_task_name') or ''}": int(m.get("id") or 0)
-                    for m in _fr_map_rows
+                        _bulk_c1, _bulk_c2, _bulk_c3 = st.columns([3, 2, 2])
+                        _bulk_new_status_label = _bulk_c1.selectbox(
+                            "Set all visible rows to status",
+                            _ctrl_status_options,
+                            key=f"ctrl_bulk_status_{project_id}",
+                        )
+                        _bulk_new_status_norm = _bulk_new_status_label.lower()
+                        _bulk_affected = [
+                            _m for _m in _ctrl_visible_rows
+                            if _fr_norm_mitigation_status(_m.get("mitigation_status")) != _bulk_new_status_norm
+                        ]
+                        _bulk_c2.metric(
+                            "Rows that will change",
+                            len(_bulk_affected),
+                            help="Rows already at the target status are skipped.",
+                        )
+                        _bulk_total_eur = sum(float(_m.get("covered_amount") or 0.0) for _m in _bulk_affected)
+                        _bulk_c3.metric(
+                            "Affected coverage (€)",
+                            f"€ {_bulk_total_eur:,.0f}",
+                        )
+                        if _bulk_affected:
+                            if st.button(
+                                f"Apply: set {len(_bulk_affected)} row(s) → {_ctrl_status_badge.get(_bulk_new_status_norm, _bulk_new_status_label)}",
+                                key=f"ctrl_bulk_apply_{project_id}",
+                                type="primary",
+                            ):
+                                _bulk_updated = 0
+                                for _bm in _bulk_affected:
+                                    _bmid = int(_bm.get("id") or 0)
+                                    _bmrid = int(_bm.get("risk_id") or 0)
+                                    _bm_mcr = str(_bm.get("mapped_mcr") or "").strip()
+                                    _bm_task = str(_bm.get("mapped_task_name") or "").strip()
+                                    _bm_amount = float(_bm.get("covered_amount") or 0.0)
+                                    _bm_type = _fr_norm_link_type(_bm.get("mitigation_type") or "existing_task")
+                                    db.update_financial_risk_mapping(
+                                        _bmid, _bmrid, _bm_mcr, _bm_task,
+                                        _bm_amount, _bm_type, _bulk_new_status_norm,
+                                        _bm.get("effective_month_ym") or "",
+                                        _bm.get("notes") or "",
+                                    )
+                                    _bulk_updated += 1
+                                st.success(
+                                    f"Bulk update complete: {_bulk_updated} row(s) set to '{_bulk_new_status_label}' "
+                                    f"(€ {_bulk_total_eur:,.0f} affected)."
+                                )
+                                st.rerun()
+                        else:
+                            st.info("All visible rows are already at the selected target status.")
+
+                    st.caption(f"Showing {len(_ctrl_visible_rows)} mitigation mapping(s). Use the dropdowns to change status; changes save immediately.")
+                    for _mit in _ctrl_visible_rows:
+                        _mid = int(_mit.get("id") or 0)
+                        _rid = int(_mit.get("risk_id") or 0)
+                        _risk_name = _fr_name_by_id.get(_rid, f"Risk #{_rid}")
+                        _mit_mcr = str(_mit.get("mapped_mcr") or "").strip()
+                        _mit_task = str(_mit.get("mapped_task_name") or "").strip()
+                        _mit_amount = float(_mit.get("covered_amount") or 0.0)
+                        _mit_notes = str(_mit.get("notes") or "").strip()
+                        _mit_eff = _fr_fmt_ym(_mit.get("effective_month_ym") or "")
+                        _mit_type = _fr_norm_link_type(_mit.get("mitigation_type") or "existing_task")
+                        _current_status_norm = _fr_norm_mitigation_status(_mit.get("mitigation_status"))
+                        _current_status_label = _fr_mitigation_status_labels.get(_current_status_norm, _current_status_norm)
+
+                        _row_bg = _ctrl_status_color.get(_current_status_norm, "#ffffff")
+                        st.markdown(
+                            f"""
+                            <div style="background:{_row_bg};border-radius:6px;padding:8px 12px;margin-bottom:6px;border:1px solid #ddd;">
+                            <strong>{_mit_task or '(Standalone)'}</strong> &nbsp;|&nbsp; {_mit_mcr} &nbsp;|&nbsp;
+                            Risk: <em>{_risk_name}</em> &nbsp;|&nbsp;
+                            €&nbsp;{_mit_amount:,.0f}
+                            {' &nbsp;|&nbsp; Effective: ' + _mit_eff if _mit_eff else ''}
+                            {' &nbsp;|&nbsp; 📝 ' + _mit_notes[:60] + ('…' if len(_mit_notes) > 60 else '') if _mit_notes else ''}
+                            </div>""",
+                            unsafe_allow_html=True,
+                        )
+
+                        _tc1, _tc2, _tc3, _tc4, _tc5 = st.columns([3, 2, 1, 1, 1])
+                        _new_status_label = _tc1.selectbox(
+                            "Status",
+                            _ctrl_status_options,
+                            index=_ctrl_status_options.index(_current_status_label.split(" ")[-1]) if _current_status_label.split(" ")[-1] in _ctrl_status_options else 1,
+                            key=f"ctrl_status_sel_{project_id}_{_mid}",
+                            label_visibility="collapsed",
+                        )
+                        _new_status_norm = _new_status_label.lower()
+
+                        if _tc2.button(
+                            f"{_ctrl_status_badge.get(_new_status_norm, _new_status_label)} Save",
+                            key=f"ctrl_save_{project_id}_{_mid}",
+                            disabled=(_new_status_norm == _current_status_norm),
+                        ):
+                            db.update_financial_risk_mapping(
+                                _mid, _rid, _mit_mcr, _mit_task,
+                                _mit_amount, _mit_type, _new_status_norm,
+                                _mit.get("effective_month_ym") or "",
+                                _mit.get("notes") or "",
+                            )
+                            st.success(f"Status updated to '{_new_status_label}' for '{_mit_task or '(Standalone)'}' (€ {_mit_amount:,.0f}).")
+                            st.rerun()
+
+                        if _tc3.button("✅", key=f"ctrl_approve_{project_id}_{_mid}", help="Approve", disabled=(_current_status_norm == "approved")):
+                            db.update_financial_risk_mapping(
+                                _mid, _rid, _mit_mcr, _mit_task,
+                                _mit_amount, _mit_type, "approved",
+                                _mit.get("effective_month_ym") or "",
+                                _mit.get("notes") or "",
+                            )
+                            st.success(f"'{_mit_task or '(Standalone)'}' approved.")
+                            st.rerun()
+
+                        if _tc4.button("🟡", key=f"ctrl_plan_{project_id}_{_mid}", help="Mark Planned", disabled=(_current_status_norm == "planned")):
+                            db.update_financial_risk_mapping(
+                                _mid, _rid, _mit_mcr, _mit_task,
+                                _mit_amount, _mit_type, "planned",
+                                _mit.get("effective_month_ym") or "",
+                                _mit.get("notes") or "",
+                            )
+                            st.success(f"'{_mit_task or '(Standalone)'}' marked as planned.")
+                            st.rerun()
+
+                        if _tc5.button("❌", key=f"ctrl_cancel_{project_id}_{_mid}", help="Cancel mitigation", disabled=(_current_status_norm == "cancelled")):
+                            db.update_financial_risk_mapping(
+                                _mid, _rid, _mit_mcr, _mit_task,
+                                _mit_amount, _mit_type, "cancelled",
+                                _mit.get("effective_month_ym") or "",
+                                _mit.get("notes") or "",
+                            )
+                            st.warning(f"'{_mit_task or '(Standalone)'}' cancelled.")
+                            st.rerun()
+
+                        st.divider()
+
+            else:  # Board view
+                _ctrl_board_statuses = ["identified", "planned", "approved", "cancelled"]
+                _ctrl_board_labels = {
+                    "identified": "🔵 Identified",
+                    "planned": "🟡 Planned",
+                    "approved": "✅ Approved",
+                    "cancelled": "❌ Cancelled",
                 }
-                _dm_c1, _dm_c2 = st.columns([4, 1])
-                _del_map_pick = _dm_c1.selectbox("Delete risk mitigation", list(_del_map_options.keys()), key=f"fr_del_map_pick_{project_id}")
-                _dm_c2.write("")
-                _dm_c2.write("")
-                if _dm_c2.button("Delete risk mitigation", key=f"fr_del_map_btn_{project_id}"):
-                    db.delete_financial_risk_mapping(_del_map_options[_del_map_pick])
-                    st.success("Mapping deleted.")
-                    st.rerun()
-    
-    # ════════════════════════════════════════════════════════════════════════════
+                _ctrl_board_cols = st.columns(4)
+                for _bi, _bstatus in enumerate(_ctrl_board_statuses):
+                    _bcol = _ctrl_board_cols[_bi]
+                    _bcol.markdown(f"**{_ctrl_board_labels[_bstatus]}**")
+                    _board_rows = [
+                        _m for _m in _ctrl_visible_rows
+                        if _fr_norm_mitigation_status(_m.get("mitigation_status")) == _bstatus
+                    ]
+                    if not _board_rows:
+                        _bcol.caption("(none)")
+                    for _bm in _board_rows:
+                        _bmid = int(_bm.get("id") or 0)
+                        _bmrid = int(_bm.get("risk_id") or 0)
+                        _bm_risk = _fr_name_by_id.get(_bmrid, f"Risk #{_bmrid}")
+                        _bm_mcr = str(_bm.get("mapped_mcr") or "").strip()
+                        _bm_task = str(_bm.get("mapped_task_name") or "").strip()
+                        _bm_amount = float(_bm.get("covered_amount") or 0.0)
+                        _bm_type = _fr_norm_link_type(_bm.get("mitigation_type") or "existing_task")
+                        _bm_notes = str(_bm.get("notes") or "").strip()
+                        _bm_eff = _fr_fmt_ym(_bm.get("effective_month_ym") or "")
+                        _bm_bg = _ctrl_status_color.get(_bstatus, "#ffffff")
+                        _bcol.markdown(
+                            f"""
+                            <div style="background:{_bm_bg};border-radius:6px;padding:8px;margin-bottom:8px;border:1px solid #ccc;font-size:0.85em;">
+                            <strong>{_bm_task or '(Standalone)'}</strong><br/>
+                            {_bm_mcr}<br/>
+                            <em style='color:#555'>Risk: {_bm_risk}</em><br/>
+                            <strong>€&nbsp;{_bm_amount:,.0f}</strong>
+                            {('<br/><span style="color:#888">Effective: ' + _bm_eff + '</span>') if _bm_eff else ''}
+                            {('<br/><span style="color:#888" title="' + _bm_notes + '">📝 Notes</span>') if _bm_notes else ''}
+                            </div>""",
+                            unsafe_allow_html=True,
+                        )
+                        if _bstatus == "identified":
+                            if _bcol.button("→ Mark Planned", key=f"ctrl_b_plan_{project_id}_{_bmid}"):
+                                db.update_financial_risk_mapping(_bmid, _bmrid, _bm_mcr, _bm_task, _bm_amount, _bm_type, "planned", _bm.get("effective_month_ym") or "", _bm.get("notes") or "")
+                                st.success(f"Marked as Planned.")
+                                st.rerun()
+                        elif _bstatus == "planned":
+                            if _bcol.button("→ Approve", key=f"ctrl_b_approve_{project_id}_{_bmid}"):
+                                db.update_financial_risk_mapping(_bmid, _bmrid, _bm_mcr, _bm_task, _bm_amount, _bm_type, "approved", _bm.get("effective_month_ym") or "", _bm.get("notes") or "")
+                                st.success(f"Approved.")
+                                st.rerun()
+                        elif _bstatus == "approved":
+                            if _bcol.button("↩ Revert to Planned", key=f"ctrl_b_revert_{project_id}_{_bmid}"):
+                                db.update_financial_risk_mapping(_bmid, _bmrid, _bm_mcr, _bm_task, _bm_amount, _bm_type, "planned", _bm.get("effective_month_ym") or "", _bm.get("notes") or "")
+                                st.warning(f"Reverted to Planned.")
+                                st.rerun()
+                        elif _bstatus == "cancelled":
+                            if _bcol.button("↩ Reactivate", key=f"ctrl_b_reactivate_{project_id}_{_bmid}"):
+                                db.update_financial_risk_mapping(_bmid, _bmrid, _bm_mcr, _bm_task, _bm_amount, _bm_type, "identified", _bm.get("effective_month_ym") or "", _bm.get("notes") or "")
+                                st.success(f"Reactivated as Identified.")
+                                st.rerun()
+                        if _bstatus != "cancelled":
+                            if _bcol.button("❌ Cancel", key=f"ctrl_b_cancel_{project_id}_{_bmid}"):
+                                db.update_financial_risk_mapping(_bmid, _bmrid, _bm_mcr, _bm_task, _bm_amount, _bm_type, "cancelled", _bm.get("effective_month_ym") or "", _bm.get("notes") or "")
+                                st.warning(f"Cancelled.")
+                                st.rerun()
+
+        with st.expander("🧪 Mitigation status diagnostics", expanded=False):
+            st.caption("Read-only check of mitigation status distribution after normalization (implemented -> approved, included_in_plan -> planned).")
+            if not _fr_map_rows:
+                st.info("No mitigation rows available for diagnostics.")
+            else:
+                _status_summary = {}
+                for _m in _fr_map_rows:
+                    _status_key = _fr_norm_mitigation_status(_m.get("mitigation_status"))
+                    _status_label = _fr_mitigation_status_labels.get(_status_key, _status_key)
+                    _covered = float(_m.get("covered_amount") or 0.0)
+                    _status_summary.setdefault(_status_label, {"rows": 0, "covered": 0.0, "eac_reducing": 0.0})
+                    _status_summary[_status_label]["rows"] += 1
+                    _status_summary[_status_label]["covered"] += _covered
+                    if _status_key in _fr_eac_reducing_statuses:
+                        _status_summary[_status_label]["eac_reducing"] += _covered
+
+                _diag_rows = []
+                for _label in sorted(_status_summary.keys()):
+                    _v = _status_summary[_label]
+                    _diag_rows.append(
+                        {
+                            "Mitigation status": _label,
+                            "Row count": int(_v.get("rows", 0) or 0),
+                            "Covered amount": float(_v.get("covered", 0.0) or 0.0),
+                            "EAC-reducing covered amount": float(_v.get("eac_reducing", 0.0) or 0.0),
+                        }
+                    )
+
+                _diag_df = pd.DataFrame(_diag_rows)
+                _diag_totals = {
+                    "Mitigation status": "TOTAL",
+                    "Row count": int(_diag_df["Row count"].sum() if "Row count" in _diag_df.columns else 0),
+                    "Covered amount": float(_diag_df["Covered amount"].sum() if "Covered amount" in _diag_df.columns else 0.0),
+                    "EAC-reducing covered amount": float(_diag_df["EAC-reducing covered amount"].sum() if "EAC-reducing covered amount" in _diag_df.columns else 0.0),
+                }
+                _diag_df = pd.concat([_diag_df, pd.DataFrame([_diag_totals])], ignore_index=True)
+                st.dataframe(
+                    _diag_df,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Covered amount": st.column_config.NumberColumn(format="€ %,.2f"),
+                        "EAC-reducing covered amount": st.column_config.NumberColumn(format="€ %,.2f"),
+                    },
+                )
+                _diag_safe_project_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(project.get("name") or "project")).strip("_") or "project"
+                st.download_button(
+                    "Download diagnostics as CSV",
+                    data=_diag_df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"mitigation_status_diagnostics_{_diag_safe_project_name}.csv",
+                    mime="text/csv",
+                    key=f"fr_diag_csv_{project_id}",
+                )
+
+        if _fr_map_rows:
+            _del_map_options = {
+                f"[{int(m.get('id') or 0)}] {_fr_name_by_id.get(int(m.get('risk_id') or 0), '')} | {m.get('mapped_mcr') or ''} | {m.get('mapped_task_name') or ''}": int(m.get("id") or 0)
+                for m in _fr_map_rows
+            }
+            _dm_c1, _dm_c2 = st.columns([4, 1])
+            _del_map_pick = _dm_c1.selectbox("Delete risk mitigation", list(_del_map_options.keys()), key=f"fr_del_map_pick_{project_id}")
+            _dm_c2.write("")
+            _dm_c2.write("")
+            if _dm_c2.button("Delete risk mitigation", key=f"fr_del_map_btn_{project_id}"):
+                db.delete_financial_risk_mapping(_del_map_options[_del_map_pick])
+                st.success("Mapping deleted.")
+                st.rerun()
+
+# ════════════════════════════════════════════════════════════════════════════
 elif page == "🔗 7. Task Mappings":
     st.title("🔗 7. Task Name Mappings")
     st.caption(
@@ -11576,25 +11366,21 @@ elif page == "📤 8. Export":
                 "Variance (€)": summary["variance"],
             }])
             df_sum.to_excel(writer, sheet_name="Summary", index=False)
-            _apply_excel_currency_format(writer.sheets["Summary"], df_sum)
 
             # Budget sheet
             if budget_items:
-                _budget_export_df = pd.DataFrame(budget_items).drop(columns=["id", "project_id"])
-                _budget_export_df.to_excel(writer, sheet_name="Budget Plan", index=False)
-                _apply_excel_currency_format(writer.sheets["Budget Plan"], _budget_export_df)
+                pd.DataFrame(budget_items).drop(columns=["id", "project_id"]).to_excel(
+                    writer, sheet_name="Budget Plan", index=False)
 
             # Actuals sheet
             if actuals:
-                _actuals_export_df = pd.DataFrame(actuals).drop(columns=["id", "project_id"])
-                _actuals_export_df.to_excel(writer, sheet_name="Actuals", index=False)
-                _apply_excel_currency_format(writer.sheets["Actuals"], _actuals_export_df)
+                pd.DataFrame(actuals).drop(columns=["id", "project_id"]).to_excel(
+                    writer, sheet_name="Actuals", index=False)
 
             # Forecast sheet
             if forecasts:
-                _forecast_export_df = pd.DataFrame(forecasts).drop(columns=["id", "project_id"])
-                _forecast_export_df.to_excel(writer, sheet_name="Forecast", index=False)
-                _apply_excel_currency_format(writer.sheets["Forecast"], _forecast_export_df)
+                pd.DataFrame(forecasts).drop(columns=["id", "project_id"]).to_excel(
+                    writer, sheet_name="Forecast", index=False)
 
         output.seek(0)
         st.download_button(
@@ -11840,7 +11626,7 @@ elif page == "📤 8. Export":
             _thin = Side(style="thin")
             _border = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
 
-            _num_fmt = '€ #,##0.00'
+            _num_fmt = '#,##0.00'
 
             for _col_idx, _col_name in enumerate(_master_df.columns, start=1):
                 _cell = _ws.cell(row=1, column=_col_idx)

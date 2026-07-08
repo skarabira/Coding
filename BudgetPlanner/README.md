@@ -63,14 +63,24 @@ This application supports end-to-end project cost management:
 - Project MCR analysis and cross-check validation.
 - Section 1.5 Estimated Actuals (projection) is now aligned to the section 5.1 project-only EAC logic (excluding financial risks), including forecast overrides. **Fixed (June 8, 2026):** Section 1.5 now properly filters forecast overrides to future months only, matching the behavior of Sections 1.9/1.10. This ensures MCR 002/003 EAC values are calculated consistently across all views.
 - Sections 1.4, 1.5, and 5.1 now auto-select the best populated Project MCR/Project No. plan column to avoid mis-grouping under `(blank)`.
-- Section 1.4 includes an additional cumulative line for Financial risks stacked over cumulative EAC.
+- Section 1.4 includes an additional cumulative line for Plan incl. remaining financial risks, calculated as selected Project No. cumulative plan plus total initial financial risks reduced only by coverage mapped to the selected Project No. scope.
+- Section 1.4 adds a dashed Cumulative Actual trendline that starts after the last completed actual month and projects future cumulative actuals by adding the average of all completed YTD monthly actuals.
+- Section 1.4 adds a selected-scope EAC gap management summary driven by the section's `Filter Project No.` selection, including scope captions, positive/negative driver KPIs, +/-5% budget status classification, top overspending/underspending drivers, contribution percentages, actual-only/plan-only data quality notes, a total row in the detail table, and Excel export with scope/KPI/detail sheets.
 - Section 1.7 adds a Financial Risks Summary with KPIs and a project-level total table:
   - Total risk amount
   - Covered risk amount
   - Uncovered risk amount
   - Coverage ratio (%)
   - Risk counts by status (fully covered / partially covered / uncovered)
+  - Covered / mitigated amount by approved MCR Project helper table for BM-00110021_002, BM-00110021_003, BM-00110021_004, BM-00110021_005, and BM-00112873_001.
 - Section 1.8 adds Pareto charts for Top 10 overspending and Top 10 underspending tasks, using Deviation = EAC (section 5.1 logic, excluding risks) - Plan, with Project MCR and Resource Group context.
+- Section 1.11 adds **Projection (based on YTD Actuals)** for proactive spend steering:
+  - Uses completed-month actuals only; the current month is ignored because it may be incomplete.
+  - Includes zero-actual months in the historical average to reflect intermittent bookings.
+  - Compares projected cost at completion against total plan at Task level, with MCR-level aggregate rows for `BM-00110021_004` and `BM-00110021_005` where actuals are only reliable at MCR project level.
+  - Supports Recommended hybrid, Rolling average based on all completed project months, and quality-gated Linear trend methods, with calculation logic, trend signal, and confidence shown per row.
+  - Trend influence is ignored when the completed-month history is sparse, flat, volatile, or has weak fit, so isolated booking spikes do not create unrealistic ramp-up projections.
+  - Flags rows when projected completion deviates from planned amount by at least +/-10%.
 
 ### Known Issues and Analysis
 

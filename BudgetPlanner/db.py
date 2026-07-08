@@ -210,6 +210,9 @@ def init_db():
             total_initial_amount  REAL NOT NULL DEFAULT 0,
             description           TEXT DEFAULT '',
             month_identified_ym   TEXT NOT NULL,
+            link_type             TEXT NOT NULL DEFAULT 'standalone',
+            linked_mcr            TEXT NOT NULL DEFAULT '',
+            linked_task_name      TEXT NOT NULL DEFAULT '',
             created_at            TEXT DEFAULT (datetime('now')),
             updated_at            TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -222,6 +225,10 @@ def init_db():
             mapped_mcr         TEXT NOT NULL,
             mapped_task_name   TEXT NOT NULL,
             covered_amount     REAL NOT NULL DEFAULT 0,
+            mitigation_type    TEXT NOT NULL DEFAULT 'existing_task',
+            mitigation_status  TEXT NOT NULL DEFAULT 'planned',
+            effective_month_ym TEXT NOT NULL DEFAULT '',
+            notes              TEXT NOT NULL DEFAULT '',
             created_at         TEXT DEFAULT (datetime('now')),
             updated_at         TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
@@ -252,6 +259,45 @@ def init_db():
         c.execute("ALTER TABLE actuals ADD COLUMN financial_document TEXT")
     if "financial_document_posting_date" not in actuals_cols:
         c.execute("ALTER TABLE actuals ADD COLUMN financial_document_posting_date TEXT")
+
+    # Lightweight migration for financial-risk link typing and mitigation maturity.
+    fr_cols = [r["name"] for r in c.execute("PRAGMA table_info(financial_risks)").fetchall()]
+    if "link_type" not in fr_cols:
+        c.execute("ALTER TABLE financial_risks ADD COLUMN link_type TEXT NOT NULL DEFAULT 'standalone'")
+    if "linked_mcr" not in fr_cols:
+        c.execute("ALTER TABLE financial_risks ADD COLUMN linked_mcr TEXT NOT NULL DEFAULT ''")
+    if "linked_task_name" not in fr_cols:
+        c.execute("ALTER TABLE financial_risks ADD COLUMN linked_task_name TEXT NOT NULL DEFAULT ''")
+
+    frm_cols = [r["name"] for r in c.execute("PRAGMA table_info(financial_risk_mappings)").fetchall()]
+    if "mitigation_type" not in frm_cols:
+        c.execute("ALTER TABLE financial_risk_mappings ADD COLUMN mitigation_type TEXT NOT NULL DEFAULT 'existing_task'")
+    if "mitigation_status" not in frm_cols:
+        c.execute("ALTER TABLE financial_risk_mappings ADD COLUMN mitigation_status TEXT NOT NULL DEFAULT 'planned'")
+    if "effective_month_ym" not in frm_cols:
+        c.execute("ALTER TABLE financial_risk_mappings ADD COLUMN effective_month_ym TEXT NOT NULL DEFAULT ''")
+    if "notes" not in frm_cols:
+        c.execute("ALTER TABLE financial_risk_mappings ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+
+    # One-time data cleanup (idempotent): normalize legacy mitigation statuses.
+    # - implemented -> approved
+    # - included_in_plan -> planned
+    c.execute(
+        """
+        UPDATE financial_risk_mappings
+        SET mitigation_status='approved',
+            updated_at=datetime('now')
+        WHERE LOWER(COALESCE(mitigation_status, ''))='implemented'
+        """
+    )
+    c.execute(
+        """
+        UPDATE financial_risk_mappings
+        SET mitigation_status='planned',
+            updated_at=datetime('now')
+        WHERE LOWER(COALESCE(mitigation_status, ''))='included_in_plan'
+        """
+    )
 
     # Lightweight migration for older DBs before plan_columns.data_type existed.
     plan_col_cols = [r["name"] for r in c.execute("PRAGMA table_info(plan_columns)").fetchall()]
@@ -323,14 +369,29 @@ def init_db():
             )
         """)
 
-    # Cache exact EAC totals displayed in section 5.1 so dashboard can consume the same value.
+    # Cache exact EAC components displayed in section 5.1 so dashboard can consume the same values.
     c.execute("""
         CREATE TABLE IF NOT EXISTS section_5_1_eac_cache (
-            project_id    INTEGER PRIMARY KEY,
-            eac_value     REAL NOT NULL DEFAULT 0,
-            updated_at    TEXT DEFAULT (datetime('now')),
+            project_id                         INTEGER PRIMARY KEY,
+            eac_value                          REAL NOT NULL DEFAULT 0,
+            forecast_eac_value                 REAL NOT NULL DEFAULT 0,
+            residual_financial_risk_value      REAL NOT NULL DEFAULT 0,
+            updated_at                         TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         )
+    """)
+
+    eac_cache_cols = [r["name"] for r in c.execute("PRAGMA table_info(section_5_1_eac_cache)").fetchall()]
+    if "forecast_eac_value" not in eac_cache_cols:
+        c.execute("ALTER TABLE section_5_1_eac_cache ADD COLUMN forecast_eac_value REAL NOT NULL DEFAULT 0")
+    if "residual_financial_risk_value" not in eac_cache_cols:
+        c.execute("ALTER TABLE section_5_1_eac_cache ADD COLUMN residual_financial_risk_value REAL NOT NULL DEFAULT 0")
+
+    # Standard plan metadata column used for later task aggregation by team.
+    c.execute("""
+        INSERT OR IGNORE INTO plan_columns (project_id, col_key, col_label, col_type, data_type, sort_order)
+        SELECT id, 'team_bucket', 'Team bucket', 'standard', 'text', 74
+        FROM projects
     """)
 
     conn.commit()
@@ -369,9 +430,17 @@ def get_projects():
 
 def add_project(name, description, start_date, end_date, status="Active"):
     conn = get_conn()
-    conn.execute(
+    cur = conn.execute(
         "INSERT INTO projects (name, description, start_date, end_date, status) VALUES (?,?,?,?,?)",
         (name, description, start_date, end_date, status),
+    )
+    project_id = cur.lastrowid
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO plan_columns (project_id, col_key, col_label, col_type, data_type, sort_order)
+        VALUES (?, 'team_bucket', 'Team bucket', 'standard', 'text', 74)
+        """,
+        (project_id,),
     )
     conn.commit()
     conn.close()
@@ -938,31 +1007,67 @@ def get_project_eac_from_section_5_1(project_id):
     return eac
 
 
-def set_section_5_1_eac_cache(project_id, eac_value):
+def set_section_5_1_eac_components_cache(project_id, forecast_eac, residual_financial_risk, total_eac=None):
+    forecast_eac = float(forecast_eac or 0.0)
+    residual_financial_risk = float(residual_financial_risk or 0.0)
+    total_eac = forecast_eac + residual_financial_risk if total_eac is None else float(total_eac or 0.0)
     conn = get_conn()
     conn.execute(
         """
-        INSERT INTO section_5_1_eac_cache (project_id, eac_value, updated_at)
-        VALUES (?, ?, datetime('now'))
+        INSERT INTO section_5_1_eac_cache
+            (project_id, eac_value, forecast_eac_value, residual_financial_risk_value, updated_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
         ON CONFLICT(project_id) DO UPDATE
-        SET eac_value=excluded.eac_value, updated_at=excluded.updated_at
+        SET eac_value=excluded.eac_value,
+            forecast_eac_value=excluded.forecast_eac_value,
+            residual_financial_risk_value=excluded.residual_financial_risk_value,
+            updated_at=excluded.updated_at
         """,
-        (project_id, float(eac_value or 0.0)),
+        (project_id, total_eac, forecast_eac, residual_financial_risk),
     )
     conn.commit()
     conn.close()
 
 
-def get_section_5_1_eac_cache(project_id):
+def set_section_5_1_eac_cache(project_id, eac_value):
+    set_section_5_1_eac_components_cache(project_id, float(eac_value or 0.0), 0.0, float(eac_value or 0.0))
+
+
+def get_section_5_1_eac_components_cache(project_id):
     conn = get_conn()
     row = conn.execute(
-        "SELECT eac_value FROM section_5_1_eac_cache WHERE project_id=?",
+        """
+        SELECT eac_value, forecast_eac_value, residual_financial_risk_value, updated_at
+        FROM section_5_1_eac_cache
+        WHERE project_id=?
+        """,
         (project_id,),
     ).fetchone()
     conn.close()
     if not row:
         return None
-    return float(row["eac_value"] or 0.0)
+
+    total_eac = float(row["eac_value"] or 0.0)
+    forecast_eac = float(row["forecast_eac_value"] or 0.0)
+    residual_financial_risk = float(row["residual_financial_risk_value"] or 0.0)
+
+    # Backward compatibility for cache rows written before components existed.
+    if abs(forecast_eac) < 0.005 and abs(residual_financial_risk) < 0.005 and abs(total_eac) >= 0.005:
+        forecast_eac = total_eac
+
+    return {
+        "forecast_eac": forecast_eac,
+        "residual_financial_risk": residual_financial_risk,
+        "total_eac": total_eac,
+        "updated_at": row["updated_at"],
+    }
+
+
+def get_section_5_1_eac_cache(project_id):
+    components = get_section_5_1_eac_components_cache(project_id)
+    if not components:
+        return None
+    return float(components["total_eac"] or 0.0)
 
 
 def _round2(v):
@@ -1026,12 +1131,22 @@ def list_financial_risks(project_id):
     return [dict(r) for r in rows]
 
 
-def create_financial_risk(project_id, risk_name, total_initial_amount, description, month_identified_ym):
+def create_financial_risk(
+    project_id,
+    risk_name,
+    total_initial_amount,
+    description,
+    month_identified_ym,
+    link_type="standalone",
+    linked_mcr="",
+    linked_task_name="",
+):
     conn = get_conn()
     conn.execute(
         """
-        INSERT INTO financial_risks (project_id, risk_name, total_initial_amount, description, month_identified_ym, updated_at)
-        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        INSERT INTO financial_risks
+            (project_id, risk_name, total_initial_amount, description, month_identified_ym, link_type, linked_mcr, linked_task_name, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         """,
         (
             project_id,
@@ -1039,6 +1154,9 @@ def create_financial_risk(project_id, risk_name, total_initial_amount, descripti
             _round2(total_initial_amount),
             str(description or "").strip(),
             _ym_from_any(month_identified_ym),
+            str(link_type or "standalone").strip() or "standalone",
+            str(linked_mcr or "").strip(),
+            str(linked_task_name or "").strip(),
         ),
     )
     rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -1047,12 +1165,21 @@ def create_financial_risk(project_id, risk_name, total_initial_amount, descripti
     return int(rid)
 
 
-def update_financial_risk(risk_id, risk_name, total_initial_amount, description, month_identified_ym):
+def update_financial_risk(
+    risk_id,
+    risk_name,
+    total_initial_amount,
+    description,
+    month_identified_ym,
+    link_type="standalone",
+    linked_mcr="",
+    linked_task_name="",
+):
     conn = get_conn()
     conn.execute(
         """
         UPDATE financial_risks
-        SET risk_name=?, total_initial_amount=?, description=?, month_identified_ym=?, updated_at=datetime('now')
+        SET risk_name=?, total_initial_amount=?, description=?, month_identified_ym=?, link_type=?, linked_mcr=?, linked_task_name=?, updated_at=datetime('now')
         WHERE id=?
         """,
         (
@@ -1060,6 +1187,9 @@ def update_financial_risk(risk_id, risk_name, total_initial_amount, description,
             _round2(total_initial_amount),
             str(description or "").strip(),
             _ym_from_any(month_identified_ym),
+            str(link_type or "standalone").strip() or "standalone",
+            str(linked_mcr or "").strip(),
+            str(linked_task_name or "").strip(),
             risk_id,
         ),
     )
@@ -1100,12 +1230,35 @@ def list_financial_risk_mappings(project_id, risk_id=None):
     return [dict(r) for r in rows]
 
 
-def create_financial_risk_mapping(project_id, risk_id, mapped_mcr, mapped_task_name, covered_amount):
+def _canonical_mitigation_status(value):
+    """Normalize mitigation status values for backward compatibility."""
+    status = str(value or "planned").strip().lower() or "planned"
+    if status == "implemented":
+        return "approved"
+    if status == "included_in_plan":
+        return "planned"
+    if status in {"identified", "planned", "approved", "cancelled"}:
+        return status
+    return "planned"
+
+
+def create_financial_risk_mapping(
+    project_id,
+    risk_id,
+    mapped_mcr,
+    mapped_task_name,
+    covered_amount,
+    mitigation_type="existing_task",
+    mitigation_status="planned",
+    effective_month_ym="",
+    notes="",
+):
     conn = get_conn()
     conn.execute(
         """
-        INSERT INTO financial_risk_mappings (project_id, risk_id, mapped_mcr, mapped_task_name, covered_amount, updated_at)
-        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        INSERT INTO financial_risk_mappings
+            (project_id, risk_id, mapped_mcr, mapped_task_name, covered_amount, mitigation_type, mitigation_status, effective_month_ym, notes, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         """,
         (
             project_id,
@@ -1113,6 +1266,10 @@ def create_financial_risk_mapping(project_id, risk_id, mapped_mcr, mapped_task_n
             str(mapped_mcr or "").strip(),
             str(mapped_task_name or "").strip(),
             _round2(covered_amount),
+            str(mitigation_type or "existing_task").strip() or "existing_task",
+            _canonical_mitigation_status(mitigation_status),
+            _ym_from_any(effective_month_ym) if effective_month_ym else "",
+            str(notes or "").strip(),
         ),
     )
     mid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -1121,18 +1278,33 @@ def create_financial_risk_mapping(project_id, risk_id, mapped_mcr, mapped_task_n
     return int(mid)
 
 
-def update_financial_risk_mapping(mapping_id, mapped_mcr, mapped_task_name, covered_amount):
+def update_financial_risk_mapping(
+    mapping_id,
+    risk_id,
+    mapped_mcr,
+    mapped_task_name,
+    covered_amount,
+    mitigation_type="existing_task",
+    mitigation_status="planned",
+    effective_month_ym="",
+    notes="",
+):
     conn = get_conn()
     conn.execute(
         """
         UPDATE financial_risk_mappings
-        SET mapped_mcr=?, mapped_task_name=?, covered_amount=?, updated_at=datetime('now')
+        SET risk_id=?, mapped_mcr=?, mapped_task_name=?, covered_amount=?, mitigation_type=?, mitigation_status=?, effective_month_ym=?, notes=?, updated_at=datetime('now')
         WHERE id=?
         """,
         (
+            int(risk_id),
             str(mapped_mcr or "").strip(),
             str(mapped_task_name or "").strip(),
             _round2(covered_amount),
+            str(mitigation_type or "existing_task").strip() or "existing_task",
+            _canonical_mitigation_status(mitigation_status),
+            _ym_from_any(effective_month_ym) if effective_month_ym else "",
+            str(notes or "").strip(),
             mapping_id,
         ),
     )
@@ -1148,6 +1320,7 @@ def delete_financial_risk_mapping(mapping_id):
 
 
 def compute_project_financial_risk_monthly(project_id, months=None):
+    eligible_mitigation_statuses = {"approved"}
     months = list(months) if months else _project_months(project_id)
     month_set = set(months)
     rows = list_financial_risks(project_id)
@@ -1169,10 +1342,18 @@ def compute_project_financial_risk_monthly(project_id, months=None):
         initial = _round2(r.get("total_initial_amount", 0.0))
         month_identified = _ym_from_any(r.get("month_identified_ym"))
         mapping_rows = by_risk.get(rid, [])
-        covered = _round2(sum(_round2(m.get("covered_amount", 0.0)) for m in mapping_rows))
-        if covered > initial + 0.0001:
-            covered = initial
-        remaining = _round2(max(initial - covered, 0.0))
+        eligible_covered_raw = _round2(sum(
+            _round2(m.get("covered_amount", 0.0))
+            for m in mapping_rows
+            if _canonical_mitigation_status(m.get("mitigation_status")) in eligible_mitigation_statuses
+        ))
+        identified_covered = _round2(sum(
+            _round2(m.get("covered_amount", 0.0))
+            for m in mapping_rows
+            if _canonical_mitigation_status(m.get("mitigation_status")) not in eligible_mitigation_statuses
+        ))
+        eligible_covered = min(eligible_covered_raw, initial) if eligible_covered_raw > initial + 0.0001 else eligible_covered_raw
+        remaining = _round2(max(initial - eligible_covered, 0.0))
 
         if abs(remaining - initial) < 0.005:
             status = "uncovered"
@@ -1207,7 +1388,12 @@ def compute_project_financial_risk_monthly(project_id, months=None):
                 "total_initial_amount": initial,
                 "description": str(r.get("description") or ""),
                 "month_identified_ym": month_identified,
-                "covered_amount": covered,
+                "link_type": str(r.get("link_type") or "standalone"),
+                "linked_mcr": str(r.get("linked_mcr") or ""),
+                "linked_task_name": str(r.get("linked_task_name") or ""),
+                "covered_amount": eligible_covered,
+                "eligible_mitigation_amount": eligible_covered,
+                "identified_mitigation_amount": identified_covered,
                 "remaining_amount": remaining,
                 "risk_status": status,
                 "monthly": monthly_map,
